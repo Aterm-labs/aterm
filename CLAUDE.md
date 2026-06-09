@@ -53,36 +53,46 @@ aterm/                         # workspace Cargo
 
 ## Estado actual (2026-06-09)
 
-- ✅ **Compila y arranca**: `cargo run -p aterm` abre ventana nativa que escanea y
-  lista tus sesiones reales por proveedor, con botón Resume (computa el argv).
-- ✅ `agent-sessions` vendorizado y verde: **59 tests cargo**.
-- ⏳ **`mod term;` está comentado en `main.rs`** — el núcleo del terminal es esqueleto
-  de referencia, aún no enchufado. El panel central es un placeholder.
+- ✅ **Operativo (Fases 1-4)**: `cargo run -p aterm` abre la ventana nativa con el
+  panel de sesiones a la izquierda, una barra de pestañas de terminales arriba y
+  el grid del terminal activo en el centro.
+- ✅ **Núcleo del terminal real**: `TermInstance` sobre `alacritty_terminal` 0.25.1
+  (PTY + `Term` + `EventLoop`), render del grid a egui (paleta ANSI 16/256/truecolor,
+  estilos, cursor, selección), input teclado→bytes, scrollback, zoom y copy/paste.
+- ✅ **Panel con paridad funcional**: filas ricas, filtro, badges de quota, preview,
+  rename/tags/color (metadata persistida), export/import y cleanup.
+- ✅ **Tests verdes**: 59 en `agent-sessions` + 2 e2e del núcleo del terminal (salida
+  del hijo e input echo). Release con `lto thin` compila.
+- ⏳ **Fase 5 (render GPU)**: no hecha por diseño — opcional, solo si el throughput
+  lo justifica (ver roadmap).
+- ⏳ **Pendientes menores conocidos**: una pestaña cuyo hijo sale (`exit`/Ctrl+D) se
+  queda con el último frame hasta cerrarla con ✕ (no autodetecta `Event::Exit`);
+  `transfer::move_session` (re-ruteo de proyecto Claude) no está cableado en la UI.
 
 ## Roadmap (fases)
 
 > Patrón validado en el fork de Warp: cada fase compila (`cargo check`) + commit +
 > prueba visual. Aquí igual.
 
-- **Fase 1 — núcleo del terminal**: activar `mod term;`, fijar la API real de
-  `alacritty_terminal` 0.25 con `cargo check`, montar `TermInstance::spawn` con
-  `tty::new` + `EventLoop`, render básico del grid en `render.rs`, input en `input.rs`.
-  Objetivo: un PTY con un shell pintándose en el panel central.
-- **Fase 2 — resume real**: el botón Resume abre un PTY con el `resume_argv` (ya
-  computado). Conecta el panel con `TermInstance`.
-- **Fase 3 — chrome**: tabs/splits, foco, copy/paste (`arboard`), scrollback,
-  resize → `WindowSize` del PTY, fuente configurable.
-- **Fase 4 — paridad con el panel de Warp/Terax**: filas ricas (modelo, branch,
-  % contexto, tiempo relativo), filtro, preview de conversación, rename/tags/color
-  (metadata.rs ya está), export/import/move (transfer.rs ya está), agrupación,
-  quota badges, cleanup. **Casi todo ya existe en `agent-sessions`** — es wiring de UI.
-- **Fase 5 — render GPU** (opcional): migrar `render.rs` de egui-painter a un atlas
+- ✅ **Fase 1 — núcleo del terminal**: `TermInstance::spawn` con `tty::new` +
+  `EventLoop`, render del grid en `render.rs`, input en `input.rs`. Un PTY con un
+  shell pintándose en el panel central. (API fijada contra `alacritty_terminal` 0.25.1.)
+- ✅ **Fase 2 — resume real**: el botón ▶ abre un PTY con el `resume_argv` bajo el
+  `cwd` de la sesión; «＋ Nueva sesión» usa `new_session_argv` del proveedor.
+- ✅ **Fase 3 — chrome**: tabs (nueva/cerrar/activar), foco con focus-lock,
+  copy/paste (`arboard`, Ctrl+Shift+C/V + copia al soltar selección), scrollback con
+  rueda, resize → `WindowSize` del PTY, zoom de fuente (Ctrl +/-/0). Splits: pendiente.
+- ✅ **Fase 4 — paridad con el panel de Warp/Terax**: filas ricas (modelo, branch,
+  % contexto, msgs, tiempo relativo), filtro, preview de conversación, rename/tags/color
+  (`metadata.rs`), export/import (`transfer.rs`), quota badges, cleanup. `move_session`
+  queda sin cablear en UI (re-ruteo de proyecto Claude, nicho).
+- ⏳ **Fase 5 — render GPU** (opcional): migrar `render.rs` de egui-painter a un atlas
   de glifos wgpu solo si el throughput en TUIs pesadas lo justifica. No antes.
 
 ## Gotchas / decisiones
 
-- **API de `alacritty_terminal` se mueve entre versiones.** Los snippets en `term/`
-  son la *forma*, no nombres exactos. Fíjalos con `cargo check` al activar Fase 1.
+- **API de `alacritty_terminal` se mueve entre versiones.** Ya fijada contra 0.25.1
+  en `term/`; si subes la versión, re-valida con `cargo check` (cambian nombres/firmas).
 - **`service_status.rs` (HTTP/reqwest) NO está vendorizado** — era la pieza pendiente
   upstream y mete una dep de red pesada. Re-añádelo tras un feature `service-status`
   cuando toque salud de servicios.
@@ -101,7 +111,7 @@ aterm/                         # workspace Cargo
 ```bash
 cargo run -p aterm            # arrancar la app
 cargo check                   # validación rápida del workspace
-cargo test -p agent-sessions  # tests de la lógica de sesiones (59)
+cargo test --workspace        # 59 (agent-sessions) + 2 e2e del núcleo del terminal
 cargo build --release         # binario optimizado (lto thin)
 ```
 
