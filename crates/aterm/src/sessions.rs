@@ -126,6 +126,9 @@ pub struct SessionPanel {
     /// Import destination project: `None` routes each session to its recorded
     /// cwd; `Some(path)` forces every imported session into that project.
     import_project: Option<String>,
+    /// Draft path for "new session in another directory" (shared across the
+    /// per-provider new-session menus; transient).
+    new_session_path: String,
     status: Option<String>,
 }
 
@@ -152,6 +155,7 @@ impl Default for SessionPanel {
             import_path: String::new(),
             import_provider: "claude".to_string(),
             import_project: None,
+            new_session_path: String::new(),
             status: None,
         }
     }
@@ -361,6 +365,10 @@ impl SessionPanel {
         let mut to_export: Option<(usize, usize)> = None;
         let mut to_delete: Option<(usize, usize, bool)> = None;
         let mut to_rename_project: Option<String> = None;
+        // Take the new-session path draft out of `self` so the scroll closure
+        // can mutate it without clashing with the immutable `self` borrows
+        // below; written back after the closure.
+        let mut new_session_path = std::mem::take(&mut self.new_session_path);
 
         // Pre-filter every session to (group_index, session_index) pairs.
         let passes = |gi: usize, si: usize| -> bool {
@@ -398,7 +406,13 @@ impl SessionPanel {
                             if let Some(q) = &group.quota {
                                 quota_badges(ui, q);
                             }
-                            new_session_pick_project(ui, group, projects, &mut action);
+                            new_session_pick_project(
+                                ui,
+                                group,
+                                projects,
+                                &mut new_session_path,
+                                &mut action,
+                            );
                             for si in visible {
                                 let s = &group.sessions[si];
                                 row_ui(
@@ -522,6 +536,7 @@ impl SessionPanel {
             let draft = self.projects.get(&path).unwrap_or("").to_string();
             self.project_edit = Some((path, draft));
         }
+        self.new_session_path = new_session_path;
 
         self.editor_window(ui.ctx());
         self.project_window(ui.ctx());
@@ -856,7 +871,7 @@ fn row_ui(
         if ui.small_button("◉").on_hover_text("Preview").clicked() {
             *to_preview = Some((provider_id.to_string(), s.id.clone(), name.clone()));
         }
-        if ui.small_button("⤓").on_hover_text("Exportar .zip").clicked() {
+        if ui.small_button("⇩").on_hover_text("Exportar .zip").clicked() {
             *to_export = Some((gi, si));
         }
         if ui.small_button("✖").on_hover_text("Eliminar").clicked() {
@@ -1060,6 +1075,7 @@ fn new_session_pick_project(
     ui: &mut egui::Ui,
     group: &ProviderGroup,
     names: &ProjectNames,
+    draft: &mut String,
     action: &mut Option<PanelAction>,
 ) {
     let argv = group.provider.new_session_argv();
@@ -1096,6 +1112,26 @@ fn new_session_pick_project(
                     ui.close_menu();
                 }
             }
+            ui.separator();
+            // A brand-new project: type any directory to open the session in.
+            ui.label("Otra ruta:");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(draft)
+                        .hint_text("/ruta/al/proyecto")
+                        .desired_width(180.0),
+                );
+                let ok = !draft.trim().is_empty();
+                if ui.add_enabled(ok, egui::Button::new("Abrir")).clicked() {
+                    *action = Some(PanelAction::Open {
+                        argv: argv.clone(),
+                        cwd: Some(PathBuf::from(draft.trim())),
+                        key: None,
+                    });
+                    draft.clear();
+                    ui.close_menu();
+                }
+            });
         });
     });
 }
