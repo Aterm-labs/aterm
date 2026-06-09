@@ -9,6 +9,48 @@ use crate::term::input::key_to_bytes;
 use crate::term::render::{self, pixel_to_point, CellMetrics};
 use crate::term::{TermInstance, TermSize};
 
+/// Install system fonts as fallbacks so symbol glyphs (✕ ⤓ ⟳ ▶ …) render.
+/// egui's built-in fonts cover little beyond Latin + a tiny emoji subset, so
+/// without this the action-button icons show as missing/blank.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    // DejaVu Sans → broad Latin/arrows/geometric; Noto Symbols2 → dingbats,
+    // technical and misc-symbol blocks (✕ ✎ ⤓ ⟳ ⎇ …).
+    let candidates = [
+        ("sys-dejavu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        (
+            "sys-noto-symbols2",
+            "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+        ),
+        ("sys-noto", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+    ];
+    let mut loaded = Vec::new();
+    for (name, path) in candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert(name.to_owned(), egui::FontData::from_owned(bytes));
+            loaded.push(name.to_owned());
+        }
+    }
+    if loaded.is_empty() {
+        return;
+    }
+    // Append as fallbacks to the *proportional* family only (the UI/buttons).
+    // The terminal grid uses Monospace, where mixing in proportional fonts
+    // would break cell alignment, so we leave that family untouched.
+    let list = fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default();
+    for name in &loaded {
+        if !list.contains(name) {
+            list.push(name.clone());
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
 /// Default monospace point size for new terminals.
 const FONT_SIZE: f32 = 14.0;
 const MIN_FONT: f32 = 7.0;
@@ -102,7 +144,7 @@ impl eframe::App for AtermApp {
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("＋ shell").clicked() {
+                if ui.button("+ shell").clicked() {
                     pending_open = Some((vec![default_shell()], None));
                 }
                 ui.separator();
@@ -113,7 +155,7 @@ impl eframe::App for AtermApp {
                     if ui.selectable_label(i == self.active, label).clicked() {
                         to_activate = Some(i);
                     }
-                    if ui.small_button("✕").on_hover_text("Cerrar").clicked() {
+                    if ui.small_button("×").on_hover_text("Cerrar").clicked() {
                         to_close = Some(i);
                     }
                     ui.separator();
@@ -137,7 +179,7 @@ impl eframe::App for AtermApp {
                 ui.heading("Terminal");
                 ui.separator();
                 ui.label(
-                    "Pulsa «＋ shell» para abrir una shell, o «▶» en una sesión \
+                    "Pulsa «+ shell» para abrir una shell, o «▶» en una sesión \
                      del panel para reanudarla.",
                 );
                 return;

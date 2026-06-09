@@ -24,6 +24,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "aterm",
         options,
-        Box::new(|_cc| Ok(Box::<app::AtermApp>::default())),
+        Box::new(|cc| {
+            app::install_fonts(&cc.egui_ctx);
+            Ok(Box::<app::AtermApp>::default())
+        }),
     )
 }
