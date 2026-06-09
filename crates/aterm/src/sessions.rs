@@ -830,7 +830,7 @@ fn row_ui(
             if win > 0 {
                 let pct = (tok * 100 / win).min(999);
                 dot(ui, &mut sep);
-                ui.colored_label(context_color(pct), format!("{pct}%"))
+                ui.colored_label(usage_color(pct as f64), format!("{pct}%"))
                     .on_hover_text("Contexto usado");
             }
         }
@@ -932,14 +932,11 @@ fn status_badge(ui: &mut egui::Ui, status: &agent_sessions::types::ServiceStatus
 fn quota_badges(ui: &mut egui::Ui, q: &ProviderQuota) {
     ui.horizontal_wrapped(|ui| {
         for w in &q.windows {
-            let color = if w.used_percent >= 90.0 {
-                egui::Color32::LIGHT_RED
-            } else if w.used_percent >= 70.0 {
-                egui::Color32::YELLOW
-            } else {
-                egui::Color32::GRAY
-            };
-            ui.colored_label(color, format!("{}: {:.0}%", w.label, w.used_percent));
+            // Same threshold logic as the session context %.
+            ui.colored_label(
+                usage_color(w.used_percent),
+                format!("{}: {:.0}%", w.label, w.used_percent),
+            );
         }
     });
 }
@@ -992,11 +989,12 @@ const C_LAVENDER: egui::Color32 = egui::Color32::from_rgb(0xb4, 0xbe, 0xfe);
 const C_TEAL: egui::Color32 = egui::Color32::from_rgb(0x94, 0xe2, 0xd5);
 const C_GREEN: egui::Color32 = egui::Color32::from_rgb(0xa6, 0xe3, 0xa1);
 
-/// Colour for a context-usage percentage: <40% green, 40–60% orange, ≥60% red.
-fn context_color(pct: u64) -> egui::Color32 {
-    if pct < 40 {
+/// Colour for any usage percentage (context, session quota, weekly quota):
+/// <40% green, 40–60% orange, ≥60% red.
+fn usage_color(pct: f64) -> egui::Color32 {
+    if pct < 40.0 {
         C_GREEN
-    } else if pct < 60 {
+    } else if pct < 60.0 {
         egui::Color32::from_rgb(0xfa, 0xb3, 0x87) // peach / orange
     } else {
         egui::Color32::from_rgb(0xf3, 0x8b, 0xa8) // red
