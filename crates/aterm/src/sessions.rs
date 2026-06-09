@@ -279,6 +279,18 @@ impl SessionPanel {
         let projects = &self.projects;
         let metadata = &self.metadata;
         let groups = &self.groups;
+        // Distinct working directories across all sessions — the project picker
+        // offered when starting a new session from a provider section.
+        let all_projects: Vec<String> = {
+            let mut v: Vec<String> = groups
+                .iter()
+                .flat_map(|g| g.sessions.iter().filter_map(|s| s.cwd.clone()))
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let all_projects = &all_projects;
 
         egui::ScrollArea::vertical().show(ui, |ui| match self.group_mode {
             GroupMode::Provider => {
@@ -302,12 +314,9 @@ impl SessionPanel {
                             if let Some(q) = &group.quota {
                                 quota_badges(ui, q);
                             }
-                            if ui.button("+ Nueva sesión").clicked() {
-                                let argv = group.provider.new_session_argv();
-                                if !argv.is_empty() {
-                                    action = Some(PanelAction::Open { argv, cwd: None, key: None });
-                                }
-                            }
+                            new_session_pick_project(
+                                ui, group, all_projects, projects, &mut action,
+                            );
                             for si in visible {
                                 let s = &group.sessions[si];
                                 row_ui(
@@ -337,6 +346,8 @@ impl SessionPanel {
                         .default_open(true)
                         .show(ui, |ui| {
                             project_rename_row(ui, project, &mut to_rename_project);
+                            let proj = (project.as_str() != NO_PROJECT).then(|| project.as_str());
+                            new_session_pick_provider(ui, groups, proj, &mut action);
                             for (gi, si) in items {
                                 let group = &groups[*gi];
                                 let s = &group.sessions[*si];
@@ -381,6 +392,19 @@ impl SessionPanel {
                                     .default_open(true)
                                     .show(ui, |ui| {
                                         project_rename_row(ui, project, &mut to_rename_project);
+                                        // Provider and project are both fixed here: open directly.
+                                        if ui.button("+ Nueva sesión").clicked() {
+                                            let argv = group.provider.new_session_argv();
+                                            if !argv.is_empty() {
+                                                let cwd = (project.as_str() != NO_PROJECT)
+                                                    .then(|| PathBuf::from(project));
+                                                action = Some(PanelAction::Open {
+                                                    argv,
+                                                    cwd,
+                                                    key: None,
+                                                });
+                                            }
+                                        }
                                         for si in sis {
                                             let s = &group.sessions[*si];
                                             row_ui(
@@ -852,6 +876,75 @@ fn project_header(projects: &ProjectNames, path: &str, count: usize) -> egui::Ri
         .map(str::to_string)
         .unwrap_or_else(|| display_path(path));
     egui::RichText::new(format!("{label} ({count})")).color(C_TEAL)
+}
+
+/// "New session" for a *project* section: the project is fixed, so the menu
+/// picks which provider to launch. Opens the new session in `project`'s cwd.
+fn new_session_pick_provider(
+    ui: &mut egui::Ui,
+    groups: &[ProviderGroup],
+    project: Option<&str>,
+    action: &mut Option<PanelAction>,
+) {
+    ui.menu_button("+ Nueva sesión ▾", |ui| {
+        ui.label("Proveedor:");
+        for group in groups {
+            let argv = group.provider.new_session_argv();
+            if argv.is_empty() {
+                continue;
+            }
+            if ui
+                .button(egui::RichText::new(&group.display_name).color(provider_color(group.provider.id())))
+                .clicked()
+            {
+                *action = Some(PanelAction::Open {
+                    argv,
+                    cwd: project.map(PathBuf::from),
+                    key: None,
+                });
+                ui.close_menu();
+            }
+        }
+    });
+}
+
+/// "New session" for a *provider* section: the provider is fixed, so the menu
+/// picks which project (working directory) to launch in.
+fn new_session_pick_project(
+    ui: &mut egui::Ui,
+    group: &ProviderGroup,
+    projects: &[String],
+    names: &ProjectNames,
+    action: &mut Option<PanelAction>,
+) {
+    let argv = group.provider.new_session_argv();
+    ui.add_enabled_ui(!argv.is_empty(), |ui| {
+        ui.menu_button("+ Nueva sesión ▾", |ui| {
+            ui.label("Proyecto:");
+            if ui.button("(directorio actual)").clicked() {
+                *action = Some(PanelAction::Open {
+                    argv: argv.clone(),
+                    cwd: None,
+                    key: None,
+                });
+                ui.close_menu();
+            }
+            for path in projects {
+                let label = names
+                    .get(path)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| display_path(path));
+                if ui.button(label).clicked() {
+                    *action = Some(PanelAction::Open {
+                        argv: argv.clone(),
+                        cwd: Some(PathBuf::from(path)),
+                        key: None,
+                    });
+                    ui.close_menu();
+                }
+            }
+        });
+    });
 }
 
 /// First row inside a project bucket: a rename button plus the real path, so
