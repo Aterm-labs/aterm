@@ -104,15 +104,18 @@ pub fn draw(
     // Capture cursor + selection state before the loop consumes `display_iter`.
     let cursor_shape = content.cursor.shape;
     let cursor_point = content.cursor.point;
+    let display_offset = content.display_offset as i32;
     let scrolled = content.display_offset != 0;
     let selection = content.selection;
 
     for indexed in content.display_iter {
         let point = indexed.point;
         let cell = indexed.cell;
-        let line = point.line.0;
+        // When scrolled into history, buffer lines are negative; the on-screen
+        // row is the buffer line shifted by the display offset.
+        let line = point.line.0 + display_offset;
         if line < 0 {
-            continue; // scrollback above the viewport; display_iter is clamped anyway
+            continue;
         }
         let col = point.column.0;
 
