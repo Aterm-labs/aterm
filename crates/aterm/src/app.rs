@@ -113,6 +113,9 @@ const MAX_FONT: f32 = 40.0;
 
 /// One open terminal tab: its PTY-backed model plus per-tab view state.
 struct Tab {
+    /// Stable id (tabs are addressed by id, not Vec position, so closing a tab
+    /// never reshuffles the split layout / focus).
+    id: u64,
     term: TermInstance,
     font_size: f32,
     /// True while a mouse drag-selection is in progress.
@@ -125,9 +128,13 @@ struct Tab {
 pub struct AtermApp {
     panel: SessionPanel,
     tabs: Vec<Tab>,
-    active: usize,
+    next_id: u64,
+    /// Tab ids tiled in the central area (1 = single view, N = split grid).
+    visible: Vec<u64>,
+    /// Tab id receiving keyboard input.
+    focused: u64,
     clipboard: Option<arboard::Clipboard>,
-    /// Set after opening a tab so it grabs keyboard focus next frame.
+    /// Set after opening/focusing a tab so it grabs keyboard focus next frame.
     focus_pending: bool,
 }
 
@@ -136,7 +143,9 @@ impl Default for AtermApp {
         Self {
             panel: SessionPanel::default(),
             tabs: Vec::new(),
-            active: 0,
+            next_id: 0,
+            visible: Vec::new(),
+            focused: 0,
             clipboard: arboard::Clipboard::new().ok(),
             focus_pending: false,
         }
@@ -156,11 +165,13 @@ impl AtermApp {
         if let Some(k) = &key {
             // Only dedupe against a still-live tab; if the previous resume has
             // exited, a re-resume should spawn a fresh agent.
-            if let Some(i) = self.tabs.iter().position(|t| {
-                t.key.as_deref() == Some(k) && t.term.exit_code().is_none()
-            }) {
-                self.active = i;
-                self.focus_pending = true;
+            if let Some(t) = self
+                .tabs
+                .iter()
+                .find(|t| t.key.as_deref() == Some(k) && t.term.exit_code().is_none())
+            {
+                let id = t.id;
+                self.focus_tab(id);
                 return;
             }
         }
@@ -174,27 +185,65 @@ impl AtermApp {
         };
         match TermInstance::spawn(argv, cwd, size, ctx.clone()) {
             Ok(term) => {
+                let id = self.next_id;
+                self.next_id += 1;
                 self.tabs.push(Tab {
+                    id,
                     term,
                     font_size: FONT_SIZE,
                     selecting: false,
                     key,
                 });
-                self.active = self.tabs.len() - 1;
+                // A fresh terminal takes over the view as a single pane.
+                self.visible = vec![id];
+                self.focused = id;
                 self.focus_pending = true;
             }
             Err(e) => eprintln!("aterm: failed to spawn terminal: {e}"),
         }
     }
 
-    fn close_tab(&mut self, i: usize) {
-        if i >= self.tabs.len() {
+    /// Show `id` as the sole pane and give it focus.
+    fn focus_tab(&mut self, id: u64) {
+        self.visible = vec![id];
+        self.focused = id;
+        self.focus_pending = true;
+    }
+
+    /// Toggle whether `id` is tiled alongside the current panes (a split).
+    fn toggle_split(&mut self, id: u64) {
+        if let Some(pos) = self.visible.iter().position(|v| *v == id) {
+            if self.visible.len() > 1 {
+                self.visible.remove(pos);
+                if self.focused == id {
+                    self.focused = self.visible[0];
+                }
+            }
+        } else {
+            self.visible.push(id);
+            self.focused = id;
+            self.focus_pending = true;
+        }
+    }
+
+    fn close_tab(&mut self, id: u64) {
+        let Some(i) = self.tabs.iter().position(|t| t.id == id) else {
             return;
-        }
+        };
         self.tabs.remove(i); // `Drop` shuts the PTY down.
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len().saturating_sub(1);
+        self.visible.retain(|v| *v != id);
+        if self.visible.is_empty() {
+            if let Some(last) = self.tabs.last() {
+                self.visible = vec![last.id];
+            }
         }
+        if self.focused == id {
+            self.focused = self.visible.first().copied().unwrap_or(0);
+        }
+    }
+
+    fn tab_index(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
     }
 
     fn copy(&mut self, text: String) {
@@ -229,23 +278,40 @@ impl eframe::App for AtermApp {
                 }
                 ui.separator();
                 let mut to_close = None;
-                let mut to_activate = None;
-                for (i, tab) in self.tabs.iter().enumerate() {
-                    let label = truncate(&tab.term.title(), 24);
-                    if ui.selectable_label(i == self.active, label).clicked() {
-                        to_activate = Some(i);
+                let mut to_focus = None;
+                let mut to_split = None;
+                for tab in &self.tabs {
+                    let id = tab.id;
+                    let shown = self.visible.contains(&id);
+                    let label = truncate(&tab.term.title(), 22);
+                    // Selected when shown; the focused pane shows in accent.
+                    let mut text = egui::RichText::new(label);
+                    if id == self.focused {
+                        text = text.color(egui::Color32::from_rgb(0xb4, 0xbe, 0xfe));
+                    }
+                    if ui.selectable_label(shown, text).clicked() {
+                        to_focus = Some(id);
+                    }
+                    if ui
+                        .small_button("⊞")
+                        .on_hover_text("Mostrar/ocultar en split")
+                        .clicked()
+                    {
+                        to_split = Some(id);
                     }
                     if ui.small_button("×").on_hover_text("Cerrar").clicked() {
-                        to_close = Some(i);
+                        to_close = Some(id);
                     }
                     ui.separator();
                 }
-                if let Some(i) = to_activate {
-                    self.active = i;
-                    self.focus_pending = true;
+                if let Some(id) = to_focus {
+                    self.focus_tab(id);
                 }
-                if let Some(i) = to_close {
-                    self.close_tab(i);
+                if let Some(id) = to_split {
+                    self.toggle_split(id);
+                }
+                if let Some(id) = to_close {
+                    self.close_tab(id);
                 }
             });
         });
@@ -255,7 +321,17 @@ impl eframe::App for AtermApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.tabs.is_empty() {
+            // Drop any visible ids whose tab is gone; fall back to a single tab.
+            let live: std::collections::HashSet<u64> =
+                self.tabs.iter().map(|t| t.id).collect();
+            self.visible.retain(|id| live.contains(id));
+            if self.visible.is_empty() {
+                if let Some(last) = self.tabs.last() {
+                    self.visible = vec![last.id];
+                    self.focused = last.id;
+                }
+            }
+            if self.visible.is_empty() {
                 ui.heading("Terminal");
                 ui.separator();
                 ui.label(
@@ -264,77 +340,119 @@ impl eframe::App for AtermApp {
                 );
                 return;
             }
-            if self.active >= self.tabs.len() {
-                self.active = self.tabs.len() - 1;
+            if self.tab_index(self.focused).is_none() {
+                self.focused = self.visible[0];
             }
 
-            let font_size = self.tabs[self.active].font_size;
-            let metrics = CellMetrics::measure(ctx, font_size);
-
-            // Match the PTY grid to the panel's current cell capacity.
-            let (cols, lines) = metrics.grid_size(ui.available_size());
-            {
-                let term = &mut self.tabs[self.active].term;
-                if term.size.columns != cols || term.size.lines != lines {
-                    term.resize(TermSize {
-                        columns: cols,
-                        lines,
-                        cell_width: metrics.width,
-                        cell_height: metrics.height,
-                    });
-                }
+            // Window title tracks the focused pane's child.
+            if let Some(i) = self.tab_index(self.focused) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "aterm — {}",
+                    self.tabs[i].term.title()
+                )));
             }
 
-            // Keep the OS window title in sync with the active child.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                "aterm — {}",
-                self.tabs[self.active].term.title()
-            )));
-
-            let response = render::draw(ui, &self.tabs[self.active].term, metrics, true);
-
-            if self.focus_pending {
-                response.request_focus();
-                self.focus_pending = false;
-            }
-            if response.clicked() {
-                response.request_focus();
-            }
-            // Keep Tab / arrows / Escape flowing to the child instead of egui's
-            // focus traversal while the grid is focused.
-            if response.has_focus() {
-                ui.memory_mut(|m| {
-                    m.set_focus_lock_filter(
-                        response.id,
-                        egui::EventFilter {
-                            tab: true,
-                            horizontal_arrows: true,
-                            vertical_arrows: true,
-                            escape: true,
-                        },
-                    )
-                });
-            }
-
-            self.handle_mouse(ui, &response, metrics);
-            // No point typing into a shell that has already exited.
-            let alive = self.tabs[self.active].term.exit_code().is_none();
-            if response.has_focus() && alive {
-                self.handle_keyboard(ui);
-            }
+            self.render_panes(ui);
         });
     }
 }
 
 impl AtermApp {
+    /// Tile the visible tabs into a near-square grid of panes.
+    fn render_panes(&mut self, ui: &mut egui::Ui) {
+        let ids: Vec<u64> = self.visible.clone();
+        let n = ids.len();
+        if n == 1 {
+            self.render_pane(ui, ids[0]);
+            return;
+        }
+        let cols = (n as f32).sqrt().ceil() as usize;
+        let rows = n.div_ceil(cols);
+        let area = ui.available_rect_before_wrap();
+        let gap = 4.0;
+        let cell_w = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
+        let cell_h = (area.height() - gap * (rows as f32 - 1.0)) / rows as f32;
+        for (idx, id) in ids.into_iter().enumerate() {
+            let r = idx / cols;
+            let c = idx % cols;
+            let min = egui::pos2(
+                area.min.x + c as f32 * (cell_w + gap),
+                area.min.y + r as f32 * (cell_h + gap),
+            );
+            let rect = egui::Rect::from_min_size(min, egui::vec2(cell_w, cell_h));
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.set_clip_rect(rect);
+                self.render_pane(ui, id);
+            });
+        }
+    }
+
+    /// Render one terminal pane (resize, draw, focus, input).
+    fn render_pane(&mut self, ui: &mut egui::Ui, id: u64) {
+        let Some(i) = self.tab_index(id) else {
+            return;
+        };
+        let focused = id == self.focused;
+        let metrics = CellMetrics::measure(ui.ctx(), self.tabs[i].font_size);
+        let (cols, lines) = metrics.grid_size(ui.available_size());
+        {
+            let term = &mut self.tabs[i].term;
+            if term.size.columns != cols || term.size.lines != lines {
+                term.resize(TermSize {
+                    columns: cols,
+                    lines,
+                    cell_width: metrics.width,
+                    cell_height: metrics.height,
+                });
+            }
+        }
+
+        let response = render::draw(ui, &self.tabs[i].term, metrics, focused);
+
+        if focused && self.focus_pending {
+            response.request_focus();
+            self.focus_pending = false;
+        }
+        if response.clicked() {
+            response.request_focus();
+            self.focused = id;
+        }
+        if response.has_focus() {
+            self.focused = id;
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                )
+            });
+        }
+
+        self.handle_mouse(ui, &response, metrics, i);
+        let alive = self.tabs[i].term.exit_code().is_none();
+        if response.has_focus() && alive {
+            self.handle_keyboard(ui, i);
+        }
+    }
+
     /// When the child requests mouse reporting, forward clicks/drag/wheel to it.
     /// Otherwise: drag → local selection (copied on release), click clears it,
     /// wheel scrolls the scrollback (or sends arrows on the alternate screen).
-    fn handle_mouse(&mut self, ui: &egui::Ui, response: &egui::Response, metrics: CellMetrics) {
+    fn handle_mouse(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        metrics: CellMetrics,
+        idx: usize,
+    ) {
         let origin = response.rect.min;
-        let modes = self.tabs[self.active].term.modes();
+        let modes = self.tabs[idx].term.modes();
         let (cols, lines, offset) = {
-            let term = &self.tabs[self.active].term;
+            let term = &self.tabs[idx].term;
             (term.size.columns, term.size.lines, term.display_offset())
         };
         let cell_at = |pos: egui::Pos2| -> (usize, usize) {
@@ -346,13 +464,13 @@ impl AtermApp {
         };
 
         if modes.mouse_report {
-            self.report_mouse(ui, response, modes, &cell_at);
+            self.report_mouse(ui, response, modes, &cell_at, idx);
             return;
         }
 
         let mut copy_text: Option<String> = None;
         {
-            let tab = &mut self.tabs[self.active];
+            let tab = &mut self.tabs[idx];
             if response.drag_started() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let (point, side) =
@@ -386,10 +504,10 @@ impl AtermApp {
                 if modes.alt_screen {
                     let seq: &[u8] = if lines > 0 { b"\x1bOA" } else { b"\x1bOB" };
                     for _ in 0..lines.unsigned_abs() {
-                        self.tabs[self.active].term.write(seq);
+                        self.tabs[idx].term.write(seq);
                     }
                 } else {
-                    self.tabs[self.active].term.scroll(lines);
+                    self.tabs[idx].term.scroll(lines);
                 }
             }
         }
@@ -402,8 +520,9 @@ impl AtermApp {
         response: &egui::Response,
         modes: crate::term::Modes,
         cell_at: &dyn Fn(egui::Pos2) -> (usize, usize),
+        idx: usize,
     ) {
-        let term = &self.tabs[self.active].term;
+        let term = &self.tabs[idx].term;
         let events = ui.input(|i| i.events.clone());
         for event in events {
             if let egui::Event::PointerButton {
@@ -466,15 +585,15 @@ impl AtermApp {
 
     /// Route this frame's key/text events to the focused terminal, intercepting
     /// font-zoom and copy/paste chords first.
-    fn handle_keyboard(&mut self, ui: &egui::Ui) {
-        let modes = self.tabs[self.active].term.modes();
+    fn handle_keyboard(&mut self, ui: &egui::Ui, idx: usize) {
+        let modes = self.tabs[idx].term.modes();
         let app_cursor = modes.app_cursor;
         let events = ui.input(|i| i.events.clone());
 
         for event in events {
             match event {
                 egui::Event::Text(text) => {
-                    self.tabs[self.active].term.write(text.as_bytes());
+                    self.tabs[idx].term.write(text.as_bytes());
                 }
                 egui::Event::Key {
                     key,
@@ -486,26 +605,26 @@ impl AtermApp {
                     if modifiers.ctrl {
                         match key {
                             egui::Key::Plus | egui::Key::Equals => {
-                                self.zoom(1.0);
+                                self.zoom(idx, 1.0);
                                 continue;
                             }
                             egui::Key::Minus => {
-                                self.zoom(-1.0);
+                                self.zoom(idx, -1.0);
                                 continue;
                             }
                             egui::Key::Num0 => {
-                                self.tabs[self.active].font_size = FONT_SIZE;
+                                self.tabs[idx].font_size = FONT_SIZE;
                                 continue;
                             }
                             egui::Key::C if modifiers.shift => {
-                                if let Some(t) = self.tabs[self.active].term.selection_text() {
+                                if let Some(t) = self.tabs[idx].term.selection_text() {
                                     self.copy(t);
                                 }
                                 continue;
                             }
                             egui::Key::V if modifiers.shift => {
                                 if let Some(t) = self.paste_text() {
-                                    self.paste_into_active(&t, modes.bracketed_paste);
+                                    self.paste_into(idx, &t, modes.bracketed_paste);
                                 }
                                 continue;
                             }
@@ -513,7 +632,7 @@ impl AtermApp {
                         }
                     }
                     if let Some(bytes) = key_to_bytes(key, modifiers, app_cursor) {
-                        self.tabs[self.active].term.write(&bytes);
+                        self.tabs[idx].term.write(&bytes);
                     }
                 }
                 _ => {}
@@ -521,15 +640,15 @@ impl AtermApp {
         }
     }
 
-    fn zoom(&mut self, delta: f32) {
-        let tab = &mut self.tabs[self.active];
+    fn zoom(&mut self, idx: usize, delta: f32) {
+        let tab = &mut self.tabs[idx];
         tab.font_size = (tab.font_size + delta).clamp(MIN_FONT, MAX_FONT);
     }
 
     /// Write pasted text, wrapping it in bracketed-paste markers when the child
     /// has enabled that mode (so editors/REPLs don't auto-indent or auto-run it).
-    fn paste_into_active(&self, text: &str, bracketed: bool) {
-        let term = &self.tabs[self.active].term;
+    fn paste_into(&self, idx: usize, text: &str, bracketed: bool) {
+        let term = &self.tabs[idx].term;
         if bracketed {
             term.write(b"\x1b[200~");
             term.write(text.as_bytes());
