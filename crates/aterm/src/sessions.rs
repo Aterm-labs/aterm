@@ -124,6 +124,8 @@ pub struct SessionPanel {
     group_mode: GroupMode,
     /// Active "folder": when set, only sessions carrying this tag are shown.
     tag_filter: Option<String>,
+    /// Show only sessions the provider reports as live.
+    only_active: bool,
     /// One-frame override to force every header open (`Some(true)`) or closed
     /// (`Some(false)`); cleared after applying.
     force_open: Option<bool>,
@@ -162,6 +164,7 @@ impl Default for SessionPanel {
             filter: String::new(),
             group_mode: GroupMode::Provider,
             tag_filter: None,
+            only_active: false,
             force_open: None,
             metadata,
             metadata_path,
@@ -280,6 +283,8 @@ impl SessionPanel {
             ui.selectable_value(&mut self.group_mode, GroupMode::Project, "Proyecto");
             ui.selectable_value(&mut self.group_mode, GroupMode::Cascade, "Proveedor › Proyecto");
         });
+
+        ui.checkbox(&mut self.only_active, "● Solo activas");
 
         // Tag "folders": a row of chips that filter to one tag at a time.
         let tags = self.metadata.all_tags();
@@ -404,6 +409,7 @@ impl SessionPanel {
 
         let filter = self.filter.to_lowercase();
         let tag_filter = self.tag_filter.clone();
+        let only_active = self.only_active;
         // Snapshot metadata for read during the closure; mutations are deferred.
         let mut to_edit: Option<(String, String)> = None;
         let mut to_preview: Option<(String, String, String)> = None;
@@ -421,7 +427,8 @@ impl SessionPanel {
         let passes = |gi: usize, si: usize| -> bool {
             let g = &self.groups[gi];
             let s = &g.sessions[si];
-            matches_filter(s, &self.metadata, g.provider.id(), &filter)
+            (!only_active || s.is_active)
+                && matches_filter(s, &self.metadata, g.provider.id(), &filter)
                 && tag_passes(&self.metadata, g.provider.id(), &s.id, tag_filter.as_deref())
         };
         let projects = &self.projects;
