@@ -460,7 +460,9 @@ impl SessionPanel {
         let groups = &self.groups;
         let force_open = self.force_open;
 
-        egui::ScrollArea::vertical().show(ui, |ui| match self.group_mode {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| match self.group_mode {
             GroupMode::Provider => {
                 for (gi, group) in groups.iter().enumerate() {
                     let provider_id = group.provider.id();
