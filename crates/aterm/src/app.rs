@@ -392,11 +392,18 @@ impl eframe::App for AtermApp {
                     if resp.drag_started() {
                         self.dragging = Some(id);
                     }
-                    if ui
-                        .small_button("⊞")
-                        .on_hover_text("Mostrar/ocultar en split")
-                        .clicked()
-                    {
+                    // Split toggle: highlighted while this terminal is on the
+                    // grid. Disabled when it's the only visible one (nothing to
+                    // split against) — that was the "does nothing" case.
+                    let can_split = !shown || self.visible.len() > 1;
+                    let split_resp = ui
+                        .add_enabled(can_split, egui::SelectableLabel::new(shown, "⊞"))
+                        .on_hover_text(if shown {
+                            "Quitar del split"
+                        } else {
+                            "Ver en split junto a las demás"
+                        });
+                    if split_resp.clicked() {
                         to_split = Some(id);
                     }
                     if ui.small_button("×").on_hover_text("Cerrar").clicked() {
