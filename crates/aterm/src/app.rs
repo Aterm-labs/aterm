@@ -343,20 +343,32 @@ impl eframe::App for AtermApp {
                     ui.separator();
                 }
 
-                // Resolve an in-progress drag: drop before the first tab whose
-                // centre is right of the pointer (or at the end).
+                // Resolve a drag once the button is no longer held (robust:
+                // doesn't depend on catching the exact release frame, so the
+                // drag state never gets stuck and blocks later clicks).
                 if let Some(src) = self.dragging {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                    if ui.input(|i| i.pointer.any_released()) {
+                    let held = ui.input(|i| i.pointer.any_down());
+                    if held {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    } else {
                         let px = ui
-                            .input(|i| i.pointer.interact_pos())
+                            .input(|i| i.pointer.interact_pos().or(i.pointer.latest_pos()))
                             .map(|p| p.x)
                             .unwrap_or(f32::INFINITY);
-                        let before = rects
+                        let on_self = rects
                             .iter()
-                            .find(|(_, r)| px < r.center().x)
-                            .map(|(id, _)| *id);
-                        self.move_tab(src, before);
+                            .find(|(id, _)| *id == src)
+                            .map_or(false, |(_, r)| px >= r.left() && px <= r.right());
+                        if on_self {
+                            // Released over itself → it was really a click.
+                            to_focus = Some(src);
+                        } else {
+                            let before = rects
+                                .iter()
+                                .find(|(_, r)| px < r.center().x)
+                                .map(|(id, _)| *id);
+                            self.move_tab(src, before);
+                        }
                         self.dragging = None;
                     }
                 }
