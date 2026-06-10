@@ -1081,7 +1081,7 @@ fn row_ui(
                 // Compact / move — Claude only.
                 if provider_id == "claude" {
                     if ui
-                        .small_button("⊟")
+                        .small_button("»«")
                         .on_hover_text("Compactar contexto (/compact)")
                         .clicked()
                     {
