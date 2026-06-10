@@ -1115,23 +1115,36 @@ fn new_session_pick_project(
             ui.separator();
             // A brand-new project: type any directory to open the session in.
             ui.label("Otra ruta:");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(draft)
-                        .hint_text("/ruta/al/proyecto")
-                        .desired_width(180.0),
-                );
-                let ok = !draft.trim().is_empty();
-                if ui.add_enabled(ok, egui::Button::new("Abrir")).clicked() {
-                    *action = Some(PanelAction::Open {
-                        argv: argv.clone(),
-                        cwd: Some(PathBuf::from(draft.trim())),
-                        key: None,
-                    });
-                    draft.clear();
-                    ui.close_menu();
+            ui.add(
+                egui::TextEdit::singleline(draft)
+                    .hint_text("/ruta/al/proyecto")
+                    .desired_width(220.0),
+            );
+            // Filesystem autocomplete (clicking a candidate keeps the menu open).
+            let trimmed = draft.trim().to_string();
+            if !trimmed.is_empty() && !std::path::Path::new(&trimmed).is_dir() {
+                for candidate in path_candidates(&trimmed) {
+                    if candidate == trimmed {
+                        continue;
+                    }
+                    if ui
+                        .selectable_label(false, completion_label(&candidate))
+                        .clicked()
+                    {
+                        *draft = candidate;
+                    }
                 }
-            });
+            }
+            let ok = !draft.trim().is_empty();
+            if ui.add_enabled(ok, egui::Button::new("Abrir")).clicked() {
+                *action = Some(PanelAction::Open {
+                    argv: argv.clone(),
+                    cwd: Some(PathBuf::from(draft.trim())),
+                    key: None,
+                });
+                draft.clear();
+                ui.close_menu();
+            }
         });
     });
 }
