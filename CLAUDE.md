@@ -66,10 +66,20 @@ aterm/                         # workspace Cargo
 - ✅ **Salida del hijo**: al terminar (`exit`/Ctrl+D) la pestaña muestra `[exited N]`
   en el título vía `Event::ChildExit`; se cierra con ✕ (no autodestruye para poder
   leer el último output).
+- ✅ **Fidelidad VT**: reporte de ratón SGR (clicks/drag/rueda → al hijo), bracketed
+  paste, y alt-scroll (rueda→flechas en alt-screen). Ver `term::Modes` +
+  `input::mouse_report`.
+- ✅ **Splits**: varios terminales en rejilla (tabs con id estable; ⊞ alterna split;
+  el pane enfocado recibe teclado). Drag-and-drop para reordenar pestañas.
+- ✅ **Tema**: Catppuccin Mocha + color de marca por proveedor, badges de estado
+  (statuspage) y quota/contexto coloreados por umbral (<40/40-60/≥60).
+- ✅ **Extras de panel**: agrupación proveedor/proyecto/cascada, nombres de proyecto,
+  buscar en scrollback (Ctrl+Shift+F), `move_session` cableado (mover sesión Claude
+  a otro proyecto), auto-refresco cada 120s.
 - ⏳ **Fase 5 (render GPU)**: no hecha por diseño — opcional, solo si el throughput
   lo justifica (ver roadmap).
-- ⏳ **Pendiente menor conocido**: `transfer::move_session` (re-ruteo de proyecto
-  Claude) no está cableado en la UI (nicho).
+- ⏳ **Pendientes menores**: import solo a Claude (el `.zip` es formato Claude);
+  persistencia de pestañas entre arranques (un PTY vivo no se serializa).
 
 ## Roadmap (fases)
 
@@ -114,7 +124,7 @@ aterm/                         # workspace Cargo
 ```bash
 cargo run -p aterm            # arrancar la app
 cargo check                   # validación rápida del workspace
-cargo test --workspace        # 59 (agent-sessions) + 2 e2e del núcleo del terminal
+cargo test --workspace        # 59 (agent-sessions) + 11 del crate aterm (núcleo + input + helpers)
 cargo build --release         # binario optimizado (lto thin)
 ```
 
