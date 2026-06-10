@@ -400,6 +400,7 @@ impl SessionPanel {
         let mut to_export: Option<(usize, usize)> = None;
         let mut to_delete: Option<(usize, usize, bool)> = None;
         let mut to_move: Option<(String, String, bool)> = None;
+        let mut to_compact: Option<(usize, usize)> = None;
         let mut to_rename_project: Option<String> = None;
         // Take the new-session path draft out of `self` so the scroll closure
         // can mutate it without clashing with the immutable `self` borrows
@@ -424,9 +425,18 @@ impl SessionPanel {
                     let visible: Vec<usize> =
                         (0..group.sessions.len()).filter(|si| passes(gi, *si)).collect();
 
+                    let active = visible
+                        .iter()
+                        .filter(|si| group.sessions[**si].is_active)
+                        .count();
                     let header = match &group.error {
                         Some(err) => format!("{} — {err}", group.display_name),
-                        None => format!("{} ({})", group.display_name, visible.len()),
+                        None => format!(
+                            "{} ({}){}",
+                            group.display_name,
+                            visible.len(),
+                            active_suffix(active)
+                        ),
                     };
                     egui::CollapsingHeader::new(
                         egui::RichText::new(header)
@@ -454,7 +464,7 @@ impl SessionPanel {
                                 row_ui(
                                     ui, s, metadata.get(provider_id, &s.id), provider_id, gi, si,
                                     false, &mut action, &mut to_edit, &mut to_preview,
-                                    &mut to_export, &mut to_delete, &mut to_move,
+                                    &mut to_export, &mut to_delete, &mut to_move, &mut to_compact,
                                 );
                             }
                         });
@@ -473,8 +483,17 @@ impl SessionPanel {
                     }
                 }
                 for (bi, (project, items)) in buckets.iter().enumerate() {
-                    egui::CollapsingHeader::new(project_header(projects, project, items.len()))
-                        .id_salt(("project", bi))
+                    let active = items
+                        .iter()
+                        .filter(|(gi, si)| groups[*gi].sessions[*si].is_active)
+                        .count();
+                    egui::CollapsingHeader::new(project_header(
+                        projects,
+                        project,
+                        items.len(),
+                        active,
+                    ))
+                    .id_salt(("project", bi))
                         .default_open(true)
                         .show(ui, |ui| {
                             project_rename_row(ui, project, &mut to_rename_project);
@@ -486,7 +505,7 @@ impl SessionPanel {
                                 row_ui(
                                     ui, s, metadata.get(group.provider.id(), &s.id),
                                     group.provider.id(), *gi, *si, true, &mut action, &mut to_edit,
-                                    &mut to_preview, &mut to_export, &mut to_delete, &mut to_move,
+                                    &mut to_preview, &mut to_export, &mut to_delete, &mut to_move, &mut to_compact,
                                 );
                             }
                         });
@@ -497,9 +516,18 @@ impl SessionPanel {
                     let provider_id = group.provider.id();
                     let visible: Vec<usize> =
                         (0..group.sessions.len()).filter(|si| passes(gi, *si)).collect();
+                    let active = visible
+                        .iter()
+                        .filter(|si| group.sessions[**si].is_active)
+                        .count();
                     let header = match &group.error {
                         Some(err) => format!("{} — {err}", group.display_name),
-                        None => format!("{} ({})", group.display_name, visible.len()),
+                        None => format!(
+                            "{} ({}){}",
+                            group.display_name,
+                            visible.len(),
+                            active_suffix(active)
+                        ),
                     };
                     egui::CollapsingHeader::new(
                         egui::RichText::new(header)
@@ -522,7 +550,14 @@ impl SessionPanel {
                                 subs.entry(project_key(&group.sessions[*si])).or_default().push(*si);
                             }
                             for (pi, (project, sis)) in subs.iter().enumerate() {
-                                egui::CollapsingHeader::new(project_header(projects, project, sis.len()))
+                                let active =
+                                    sis.iter().filter(|si| group.sessions[**si].is_active).count();
+                                egui::CollapsingHeader::new(project_header(
+                                    projects,
+                                    project,
+                                    sis.len(),
+                                    active,
+                                ))
                                     .id_salt(("casc-proj", gi, pi))
                                     .default_open(true)
                                     .show(ui, |ui| {
@@ -545,7 +580,7 @@ impl SessionPanel {
                                             row_ui(
                                                 ui, s, metadata.get(provider_id, &s.id), provider_id,
                                                 gi, *si, false, &mut action, &mut to_edit,
-                                                &mut to_preview, &mut to_export, &mut to_delete, &mut to_move,
+                                                &mut to_preview, &mut to_export, &mut to_delete, &mut to_move, &mut to_compact,
                                             );
                                         }
                                     });
@@ -575,6 +610,15 @@ impl SessionPanel {
                 is_live,
                 dest: source_cwd,
             });
+        }
+        if let Some((gi, si)) = to_compact {
+            let g = &self.groups[gi];
+            let session_id = g.sessions[si].id.clone();
+            if let Some(argv) = g.provider.compact_argv(&session_id) {
+                let cwd = g.sessions[si].cwd.as_ref().map(PathBuf::from);
+                // Opens a one-off terminal running `/compact`; not a resume.
+                action = Some(PanelAction::Open { argv, cwd, key: None });
+            }
         }
         if let Some(path) = to_rename_project {
             let draft = self.projects.get(&path).unwrap_or("").to_string();
@@ -914,6 +958,7 @@ fn row_ui(
     to_export: &mut Option<(usize, usize)>,
     to_delete: &mut Option<(usize, usize, bool)>,
     to_move: &mut Option<(String, String, bool)>,
+    to_compact: &mut Option<(usize, usize)>,
 ) {
     let name = meta
         .and_then(|m| m.name.clone())
@@ -937,7 +982,8 @@ fn row_ui(
             });
         }
         if s.is_active {
-            ui.colored_label(C_GREEN, "●").on_hover_text("Activa ahora");
+            let (color, tip) = live_state(s.live_status.as_deref());
+            ui.colored_label(color, "●").on_hover_text(tip);
         }
         // In the by-project view, prefix the provider so the row stays legible.
         if show_provider {
@@ -1004,9 +1050,16 @@ fn row_ui(
         if ui.small_button("⇩").on_hover_text("Exportar .zip").clicked() {
             *to_export = Some((gi, si));
         }
-        // Re-route to another project — Claude only (its on-disk layout is the
-        // one `transfer::move_session` understands).
+        // Compact and re-route — Claude only (the only provider implementing
+        // `compact_argv` / the project layout `move_session` understands).
         if provider_id == "claude" {
+            if ui
+                .small_button("⊟")
+                .on_hover_text("Compactar contexto (/compact)")
+                .clicked()
+            {
+                *to_compact = Some((gi, si));
+            }
             if let Some(cwd) = &s.cwd {
                 if ui.small_button("⇄").on_hover_text("Mover a otro proyecto").clicked() {
                     *to_move = Some((s.id.clone(), cwd.clone(), s.is_active));
@@ -1150,6 +1203,18 @@ fn usage_color(pct: f64) -> egui::Color32 {
     }
 }
 
+/// Colour + tooltip for a live session's status: working vs waiting.
+fn live_state(status: Option<&str>) -> (egui::Color32, &'static str) {
+    match status {
+        Some("busy") => (
+            egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),
+            "Trabajando",
+        ),
+        Some("idle") => (C_GREEN, "En espera"),
+        _ => (egui::Color32::from_rgb(0x89, 0xb4, 0xfa), "Activa"),
+    }
+}
+
 /// Brand-ish accent per provider, for the section headers.
 fn provider_color(id: &str) -> egui::Color32 {
     match id {
@@ -1169,13 +1234,28 @@ fn project_key(s: &AgentSession) -> String {
 /// Sentinel project key for sessions whose provider didn't record a cwd.
 const NO_PROJECT: &str = "(sin proyecto)";
 
-/// Header for a project bucket: the user's alias if set, else the path, in teal.
-fn project_header(projects: &ProjectNames, path: &str, count: usize) -> egui::RichText {
+/// Header for a project bucket: alias if set, else the path; in teal, with an
+/// active-session count when any are live.
+fn project_header(
+    projects: &ProjectNames,
+    path: &str,
+    count: usize,
+    active: usize,
+) -> egui::RichText {
     let label = projects
         .get(path)
         .map(str::to_string)
         .unwrap_or_else(|| display_path(path));
-    egui::RichText::new(format!("{label} ({count})")).color(C_TEAL)
+    egui::RichText::new(format!("{label} ({count}){}", active_suffix(active))).color(C_TEAL)
+}
+
+/// `"  ●N"` suffix for headers when `n` sessions are live (empty when none).
+fn active_suffix(n: usize) -> String {
+    if n > 0 {
+        format!("  ●{n}")
+    } else {
+        String::new()
+    }
 }
 
 /// "New session" for a *project* section: the project is fixed, so the menu

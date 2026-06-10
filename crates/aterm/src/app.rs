@@ -106,6 +106,16 @@ pub fn install_theme(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+/// Tab accent swatches (Catppuccin), offered in the rename/colour dialog.
+const TAB_SWATCHES: [(&str, egui::Color32); 6] = [
+    ("Lavanda", egui::Color32::from_rgb(0xb4, 0xbe, 0xfe)),
+    ("Verde", egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)),
+    ("Amarillo", egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)),
+    ("Melocotón", egui::Color32::from_rgb(0xfa, 0xb3, 0x87)),
+    ("Rojo", egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)),
+    ("Malva", egui::Color32::from_rgb(0xcb, 0xa6, 0xf7)),
+];
+
 /// Default monospace point size for new terminals.
 const FONT_SIZE: f32 = 14.0;
 const MIN_FONT: f32 = 7.0;
@@ -123,6 +133,15 @@ struct Tab {
     /// `provider:id` for resumed sessions; `None` for plain shells. Used to
     /// avoid resuming the same session into two tabs.
     key: Option<String>,
+    /// User-set tab name (overrides the child's title) and accent colour.
+    name: Option<String>,
+    color: Option<egui::Color32>,
+}
+
+/// In-flight tab rename/recolour dialog.
+struct TabEdit {
+    id: u64,
+    name: String,
 }
 
 pub struct AtermApp {
@@ -143,6 +162,8 @@ pub struct AtermApp {
     search_last: Option<i32>,
     /// Tab id currently being dragged to reorder, if any.
     dragging: Option<u64>,
+    /// Open tab rename/colour dialog.
+    tab_edit: Option<TabEdit>,
 }
 
 impl Default for AtermApp {
@@ -159,6 +180,7 @@ impl Default for AtermApp {
             search_query: String::new(),
             search_last: None,
             dragging: None,
+            tab_edit: None,
         }
     }
 }
@@ -204,6 +226,8 @@ impl AtermApp {
                     font_size: FONT_SIZE,
                     selecting: false,
                     key,
+                    name: None,
+                    color: None,
                 });
                 // A fresh terminal takes over the view as a single pane.
                 self.visible = vec![id];
@@ -288,6 +312,18 @@ impl eframe::App for AtermApp {
         let mut pending_open: Option<(Vec<String>, Option<std::path::PathBuf>, Option<String>)> =
             None;
 
+        // Auto-close tabs whose child has exited (`exit` / Ctrl+D) instead of
+        // leaving an `[exited N]` placeholder behind.
+        let exited: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|t| t.term.exit_code().is_some())
+            .map(|t| t.id)
+            .collect();
+        for id in exited {
+            self.close_tab(id);
+        }
+
         egui::SidePanel::left("sessions")
             .resizable(true)
             .default_width(380.0)
@@ -306,14 +342,22 @@ impl eframe::App for AtermApp {
                 let mut to_close = None;
                 let mut to_focus = None;
                 let mut to_split = None;
+                let mut to_edit_tab = None;
                 // Each tab label's horizontal extent, to resolve a drop by x.
                 let mut rects: Vec<(u64, egui::Rect)> = Vec::new();
                 for tab in &self.tabs {
                     let id = tab.id;
                     let shown = self.visible.contains(&id);
-                    let label = truncate(&tab.term.title(), 22);
+                    // User name overrides the child title.
+                    let label = truncate(
+                        tab.name.as_deref().unwrap_or(&tab.term.title()),
+                        22,
+                    );
                     let mut text = egui::RichText::new(label);
-                    if id == self.focused {
+                    // Custom colour wins; else the focused pane shows in accent.
+                    if let Some(c) = tab.color {
+                        text = text.color(c);
+                    } else if id == self.focused {
                         text = text.color(egui::Color32::from_rgb(0xb4, 0xbe, 0xfe));
                     }
                     if self.dragging == Some(id) {
@@ -322,10 +366,14 @@ impl eframe::App for AtermApp {
                     // Make the label sense dragging as well as clicking.
                     let resp = ui
                         .selectable_label(shown, text)
-                        .interact(egui::Sense::click_and_drag());
+                        .interact(egui::Sense::click_and_drag())
+                        .on_hover_text("Click: enfocar · arrastra: reordenar · clic dcho: renombrar");
                     rects.push((id, resp.rect));
                     if resp.clicked() {
                         to_focus = Some(id);
+                    }
+                    if resp.secondary_clicked() {
+                        to_edit_tab = Some(id);
                     }
                     if resp.drag_started() {
                         self.dragging = Some(id);
@@ -341,6 +389,14 @@ impl eframe::App for AtermApp {
                         to_close = Some(id);
                     }
                     ui.separator();
+                }
+                if let Some(id) = to_edit_tab {
+                    if let Some(t) = self.tabs.iter().find(|t| t.id == id) {
+                        self.tab_edit = Some(TabEdit {
+                            id,
+                            name: t.name.clone().unwrap_or_default(),
+                        });
+                    }
                 }
 
                 // Resolve a drag once the button is no longer held (robust:
@@ -426,10 +482,68 @@ impl eframe::App for AtermApp {
             }
             self.render_panes(ui);
         });
+
+        self.tab_edit_window(ctx);
     }
 }
 
 impl AtermApp {
+    /// Rename / recolour the active tab (opened by right-clicking its label).
+    fn tab_edit_window(&mut self, ctx: &egui::Context) {
+        let Some(edit) = self.tab_edit.as_mut() else {
+            return;
+        };
+        let id = edit.id;
+        let mut open = true;
+        let mut apply_name = false;
+        let mut set_color: Option<Option<egui::Color32>> = None;
+        egui::Window::new("Pestaña")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Nombre:");
+                let resp = ui.text_edit_singleline(&mut edit.name);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    apply_name = true;
+                }
+                if ui.button("Aplicar nombre").clicked() {
+                    apply_name = true;
+                }
+                ui.separator();
+                ui.label("Color:");
+                ui.horizontal_wrapped(|ui| {
+                    for (name, c) in TAB_SWATCHES {
+                        if ui
+                            .add(egui::Button::new("  ").fill(c).min_size(egui::vec2(22.0, 18.0)))
+                            .on_hover_text(name)
+                            .clicked()
+                        {
+                            set_color = Some(Some(c));
+                        }
+                    }
+                    if ui.button("Sin color").clicked() {
+                        set_color = Some(None);
+                    }
+                });
+            });
+
+        // Apply outside the borrow of `edit`.
+        if apply_name {
+            let name = self.tab_edit.as_ref().map(|e| e.name.trim().to_string());
+            if let (Some(name), Some(t)) = (name, self.tabs.iter_mut().find(|t| t.id == id)) {
+                t.name = (!name.is_empty()).then_some(name);
+            }
+        }
+        if let Some(c) = set_color {
+            if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
+                t.color = c;
+            }
+        }
+        if !open {
+            self.tab_edit = None;
+        }
+    }
+
     /// Scrollback search bar for the focused pane (Ctrl+Shift+F toggles it).
     fn search_bar(&mut self, ui: &mut egui::Ui) {
         let Some(idx) = self.tab_index(self.focused) else {
