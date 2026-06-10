@@ -481,65 +481,77 @@ impl AtermApp {
         let mut s = initial.clone();
         let mut reapply_theme = false;
 
+        let accent = crate::theme::pal().lavender;
         egui::Window::new("Ajustes")
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
-            .default_width(320.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(420.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Apariencia");
-                    ui.horizontal(|ui| {
-                        ui.label("Tema:");
-                        let current = crate::theme::current_name();
-                        egui::ComboBox::from_id_salt("settings-theme")
-                            .selected_text(&current)
-                            .show_ui(ui, |ui| {
-                                for (name, _) in crate::theme::THEMES {
-                                    if ui.selectable_label(current == name, name).clicked() {
-                                        crate::theme::select(ui.ctx(), name);
+                ui.spacing_mut().slider_width = 160.0;
+                ui.add_space(2.0);
+
+                section(ui, accent, "Apariencia", |ui| {
+                    egui::Grid::new("set-ap")
+                        .num_columns(2)
+                        .spacing([16.0, 10.0])
+                        .show(ui, |ui| {
+                            ui.label("Tema");
+                            let current = crate::theme::current_name();
+                            egui::ComboBox::from_id_salt("settings-theme")
+                                .selected_text(&current)
+                                .show_ui(ui, |ui| {
+                                    for (name, _) in crate::theme::THEMES {
+                                        if ui.selectable_label(current == name, name).clicked() {
+                                            crate::theme::select(ui.ctx(), name);
+                                        }
                                     }
-                                }
-                            });
-                    });
-                    if ui
-                        .add(egui::Slider::new(&mut s.ui_font, 11.0..=22.0).text("Fuente UI"))
-                        .changed()
-                    {
-                        reapply_theme = true;
-                    }
-                    ui.add(
-                        egui::Slider::new(&mut s.term_font, 8.0..=28.0).text("Fuente terminal"),
-                    );
+                                });
+                            ui.end_row();
+
+                            ui.label("Fuente de la interfaz");
+                            if ui.add(egui::Slider::new(&mut s.ui_font, 11.0..=22.0)).changed() {
+                                reapply_theme = true;
+                            }
+                            ui.end_row();
+
+                            ui.label("Fuente del terminal");
+                            ui.add(egui::Slider::new(&mut s.term_font, 8.0..=28.0));
+                            ui.end_row();
+                        });
                     ui.label(
                         egui::RichText::new("La fuente del terminal aplica a pestañas nuevas.")
                             .small()
                             .weak(),
                     );
+                });
 
-                    ui.add_space(8.0);
-                    ui.heading("Terminal");
+                section(ui, accent, "Terminal", |ui| {
                     ui.checkbox(&mut s.auto_close_on_exit, "Cerrar la pestaña al salir (exit)");
-                    ui.horizontal(|ui| {
-                        ui.label("Shell:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut s.shell_command)
-                                .hint_text("$SHELL")
-                                .desired_width(180.0),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Dir. inicial:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut s.shell_dir)
-                                .hint_text("~ (home)")
-                                .desired_width(180.0),
-                        );
-                    });
+                    egui::Grid::new("set-term")
+                        .num_columns(2)
+                        .spacing([16.0, 10.0])
+                        .show(ui, |ui| {
+                            ui.label("Shell");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut s.shell_command)
+                                    .hint_text("$SHELL")
+                                    .desired_width(200.0),
+                            );
+                            ui.end_row();
+                            ui.label("Directorio inicial");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut s.shell_dir)
+                                    .hint_text("~ (home)")
+                                    .desired_width(200.0),
+                            );
+                            ui.end_row();
+                        });
+                });
 
-                    ui.add_space(8.0);
-                    ui.heading("Panel de sesiones");
-                    ui.label("Proveedores a escanear:");
+                section(ui, accent, "Panel de sesiones", |ui| {
+                    ui.label("Proveedores a escanear");
                     ui.horizontal_wrapped(|ui| {
                         ui.checkbox(&mut s.scan_claude, "Claude");
                         ui.checkbox(&mut s.scan_codex, "Codex");
@@ -547,10 +559,14 @@ impl AtermApp {
                         ui.checkbox(&mut s.scan_gemini, "Gemini");
                     });
                     ui.checkbox(&mut s.fetch_status, "Consultar estado y quota (red)");
-                    ui.horizontal(|ui| {
-                        ui.label("Auto-refresco:");
-                        ui.add(egui::Slider::new(&mut s.refresh_secs, 15..=600).suffix(" s"));
-                    });
+                    egui::Grid::new("set-panel")
+                        .num_columns(2)
+                        .spacing([16.0, 10.0])
+                        .show(ui, |ui| {
+                            ui.label("Auto-refresco");
+                            ui.add(egui::Slider::new(&mut s.refresh_secs, 15..=600).suffix(" s"));
+                            ui.end_row();
+                        });
                 });
             });
 
@@ -965,6 +981,21 @@ impl AtermApp {
             term.write(text.as_bytes());
         }
     }
+}
+
+/// A titled settings section: accent heading + a touch of breathing room.
+fn section(ui: &mut egui::Ui, accent: egui::Color32, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new(title.to_uppercase())
+            .color(accent)
+            .strong()
+            .size(13.0),
+    );
+    ui.add_space(4.0);
+    body(ui);
+    ui.add_space(8.0);
+    ui.separator();
 }
 
 fn default_shell() -> String {
