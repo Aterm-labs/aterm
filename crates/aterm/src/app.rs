@@ -969,6 +969,17 @@ impl AtermApp {
             (col, line)
         };
 
+        // Ctrl+click opens a URL under the cursor (works even inside TUIs).
+        if response.clicked() && ui.input(|i| i.modifiers.ctrl) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (col, line) = cell_at(pos);
+                if let Some(url) = self.tabs[idx].term.url_at(col, line) {
+                    open_url(&url);
+                    return;
+                }
+            }
+        }
+
         // When the child captures the mouse (TUIs like Claude), forward events
         // to it — unless Shift is held, the standard override to select/copy
         // locally instead.
@@ -1222,6 +1233,12 @@ fn label_w(ui: &mut egui::Ui, text: &str) {
             ui.label(text);
         },
     );
+}
+
+/// Open a URL in the system browser (best-effort).
+fn open_url(url: &str) {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener).arg(url).spawn();
 }
 
 fn default_shell() -> String {

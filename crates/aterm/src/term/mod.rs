@@ -64,6 +64,37 @@ impl Dimensions for TermSize {
     }
 }
 
+/// Find an `http(s)://` URL covering char index `col` in `line`. Stops at
+/// whitespace and trims trailing punctuation that's usually not part of a link.
+fn url_in_line(line: &[char], col: usize) -> Option<String> {
+    let starts = |i: usize, p: &str| -> bool {
+        let pc: Vec<char> = p.chars().collect();
+        i + pc.len() <= line.len() && line[i..i + pc.len()] == pc[..]
+    };
+    let n = line.len();
+    let mut i = 0;
+    while i < n {
+        if starts(i, "https://") || starts(i, "http://") {
+            let mut j = i;
+            while j < n && !line[j].is_whitespace() && !matches!(line[j], '"' | '<' | '>' | '`' | '\'') {
+                j += 1;
+            }
+            // Trim trailing punctuation like ).,;:
+            let mut end = j;
+            while end > i && matches!(line[end - 1], ')' | '.' | ',' | ';' | ':' | ']' | '}') {
+                end -= 1;
+            }
+            if col >= i && col < end {
+                return Some(line[i..end].iter().collect());
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 /// VT mode flags the input/render layer reads each frame.
 #[derive(Clone, Copy)]
 pub struct Modes {
@@ -243,6 +274,21 @@ impl TermInstance {
     /// The selected text, if any, in reading order.
     pub fn selection_text(&self) -> Option<String> {
         self.term.lock().selection_to_string()
+    }
+
+    /// The http(s) URL under viewport cell `(col, vline)`, if any.
+    pub fn url_at(&self, col: usize, vline: usize) -> Option<String> {
+        use alacritty_terminal::term::viewport_to_point;
+        let term = self.term.lock();
+        let grid = term.grid();
+        let point = viewport_to_point(grid.display_offset(), Point::new(vline, Column(col)));
+        if point.line.0 < grid.topmost_line().0 || point.line.0 > grid.bottommost_line().0 {
+            return None;
+        }
+        let cols = grid.columns();
+        let row = &grid[point.line];
+        let line: Vec<char> = (0..cols).map(|c| row[Column(c)].c).collect();
+        url_in_line(&line, col)
     }
 
     /// Search the grid + scrollback upward for `query` (case-insensitive),
@@ -488,5 +534,30 @@ mod tests {
             }
         }
         assert_eq!(code, Some(7), "child exit code never observed");
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::url_in_line;
+
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    #[test]
+    fn finds_url_under_column_and_trims_punctuation() {
+        let l = chars("ver https://example.com/x), gracias");
+        // col 10 falls inside the URL
+        assert_eq!(url_in_line(&l, 10).as_deref(), Some("https://example.com/x"));
+        // trailing ) is trimmed
+        assert!(!url_in_line(&l, 10).unwrap().ends_with(')'));
+        // a column outside any URL → None
+        assert_eq!(url_in_line(&l, 0), None);
+    }
+
+    #[test]
+    fn no_url() {
+        assert_eq!(url_in_line(&chars("solo texto plano"), 3), None);
     }
 }
