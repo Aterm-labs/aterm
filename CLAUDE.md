@@ -37,11 +37,17 @@ aterm/                         # workspace Cargo
 │   │   └── src/{providers/*, extract, live, metadata, transfer, provider, types}
 │   └── aterm/                 # la app
 │       └── src/
-│           ├── main.rs        # app egui (ventana + panel de sesiones)  ← FUNCIONA
-│           └── term/          # núcleo del terminal                     ← REFERENCIA
-│               ├── mod.rs     #   TermInstance: PTY + Term + EventLoop
+│           ├── main.rs        # entrada: instala fuentes/tema y lanza AtermApp
+│           ├── app.rs         # AtermApp: chrome, tabs, splits, ratón/teclado, menús
+│           ├── sessions.rs    # SessionPanel: panel izquierdo (scan/filtro/preview/…)
+│           ├── theme.rs       # 10 paletas conmutables + apply() de egui Visuals
+│           ├── settings.rs    # Settings persistidos (~/.config/aterm/settings.json)
+│           ├── persist.rs     # recetas de pestañas → session.json (restaurar al abrir)
+│           ├── service_status.rs # salud de proveedores vía curl a statuspage v2
+│           └── term/          # núcleo del terminal
+│               ├── mod.rs     #   TermInstance: PTY + Term + EventLoop + selección/búsqueda
 │               ├── render.rs  #   grid de celdas → egui (EL GRUESO)
-│               └── input.rs   #   tecla → bytes de escape
+│               └── input.rs   #   tecla → bytes de escape · mouse_report SGR/X10
 ```
 
 **Reparto de superficie** (lo importante de entender):
@@ -51,7 +57,7 @@ aterm/                         # workspace Cargo
 - **Tú escribes**: `render.rs` (~300-500 LoC), `input.rs` (~200-400), chrome/tabs
   (~600-1000), wiring (~200). Total nuevo MVP: **~1.5k-2.5k LoC**.
 
-## Estado actual (2026-06-09)
+## Estado actual (2026-06-11)
 
 - ✅ **Operativo (Fases 1-4)**: `cargo run -p aterm` abre la ventana nativa con el
   panel de sesiones a la izquierda, una barra de pestañas de terminales arriba y
@@ -61,8 +67,9 @@ aterm/                         # workspace Cargo
   estilos, cursor, selección), input teclado→bytes, scrollback, zoom y copy/paste.
 - ✅ **Panel con paridad funcional**: filas ricas, filtro, badges de quota, preview,
   rename/tags/color (metadata persistida), export/import y cleanup.
-- ✅ **Tests verdes**: 59 en `agent-sessions` + 3 e2e del núcleo del terminal (salida
-  del hijo en el grid, input echo, código de salida). Release con `lto thin` compila.
+- ✅ **Tests verdes**: 59 en `agent-sessions` + 15 del crate `aterm` (e2e del núcleo:
+  salida del hijo, input echo, exit code; + URL/www/mailto/file, ratón SGR/X10,
+  helpers de sesión/status). Release con `lto thin` compila.
 - ✅ **Salida del hijo**: al terminar (`exit`/Ctrl+D) la pestaña muestra `[exited N]`
   en el título vía `Event::ChildExit`; se cierra con ✕ (no autodestruye para poder
   leer el último output).
@@ -70,16 +77,33 @@ aterm/                         # workspace Cargo
   paste, y alt-scroll (rueda→flechas en alt-screen). Ver `term::Modes` +
   `input::mouse_report`.
 - ✅ **Splits**: varios terminales en rejilla (tabs con id estable; ⊞ alterna split;
-  el pane enfocado recibe teclado). Drag-and-drop para reordenar pestañas.
-- ✅ **Tema**: Catppuccin Mocha + color de marca por proveedor, badges de estado
+  el pane enfocado recibe teclado). Divisores **arrastrables** para redimensionar
+  (`split_dividers`/`shift_frac`, fracciones por columna/fila). Drag-and-drop para
+  reordenar pestañas.
+- ✅ **Atajos de pestañas (globales en `update`)**: `Ctrl+Tab`/`Ctrl+Shift+Tab`
+  ciclan, `Alt+1..9` saltan a la N, `Ctrl+Shift+W` cierra (confirma si hay proceso),
+  `Ctrl+Shift+T` reabre la última cerrada en su **cwd real** (`/proc/<pid>/cwd`).
+- ✅ **Persistencia de pestañas entre arranques**: `persist.rs` guarda las recetas
+  (argv, cwd vivo, key, name) en `~/.config/aterm/session.json` (throttled ~1.5s) y
+  las reabre al iniciar. Un PTY vivo no se serializa; se relanza la receta.
+- ✅ **Selección + ratón**: selección local sin "cuadrícula" (el rect solapa 1px),
+  cursor I-beam sobre texto / mano sobre enlaces, clic central pega (X11), y **menú
+  contextual con clic derecho** (`term_context_menu`: copiar/pegar/seleccionar todo/
+  limpiar/enlaces/buscar; Shift fuerza local dentro de TUIs con mouse-reporting).
+- ✅ **Búsqueda en scrollback (Ctrl+Shift+F)**: salta a la coincidencia y **resalta
+  todas** las visibles (`TermInstance::viewport_matches` → `render::draw`).
+- ✅ **Tema**: 10 paletas conmutables (Mocha, Tokyo Night, Dracula, Nord, Gruvbox,
+  Solarized, One Dark, Rosé Pine, Monokai + **Catppuccin Latte claro**; `apply` elige
+  base light/dark por luminancia). Color de marca por proveedor, badges de estado
   (statuspage) y quota/contexto coloreados por umbral (<40/40-60/≥60).
 - ✅ **Extras de panel**: agrupación proveedor/proyecto/cascada, nombres de proyecto,
-  buscar en scrollback (Ctrl+Shift+F), `move_session` cableado (mover sesión Claude
-  a otro proyecto), auto-refresco cada 120s.
+  buscar en el contenido de conversaciones (FTS), `move_session` cableado (mover sesión
+  Claude a otro proyecto), auto-refresco cada 120s.
+- ✅ **Ajustes** (`settings.rs`, ⚙): fuentes UI/terminal, proveedores a escanear,
+  auto-cierre al exit, comando/dir de shell, cadencia de refresco, consulta de estado.
 - ⏳ **Fase 5 (render GPU)**: no hecha por diseño — opcional, solo si el throughput
   lo justifica (ver roadmap).
-- ⏳ **Pendientes menores**: import solo a Claude (el `.zip` es formato Claude);
-  persistencia de pestañas entre arranques (un PTY vivo no se serializa).
+- ⏳ **Pendientes menores**: import solo a Claude (el `.zip` es formato Claude).
 
 ## Roadmap (fases)
 
@@ -91,9 +115,10 @@ aterm/                         # workspace Cargo
   shell pintándose en el panel central. (API fijada contra `alacritty_terminal` 0.25.1.)
 - ✅ **Fase 2 — resume real**: el botón ▶ abre un PTY con el `resume_argv` bajo el
   `cwd` de la sesión; «＋ Nueva sesión» usa `new_session_argv` del proveedor.
-- ✅ **Fase 3 — chrome**: tabs (nueva/cerrar/activar), foco con focus-lock,
-  copy/paste (`arboard`, Ctrl+Shift+C/V + copia al soltar selección), scrollback con
-  rueda, resize → `WindowSize` del PTY, zoom de fuente (Ctrl +/-/0). Splits: pendiente.
+- ✅ **Fase 3 — chrome**: tabs (nueva/cerrar/activar/reordenar), foco con focus-lock,
+  copy/paste (`arboard`, Ctrl+Shift+C/V + copia al soltar selección + menú contextual),
+  scrollback con rueda, resize → `WindowSize` del PTY, zoom de fuente (Ctrl +/-/0),
+  splits redimensionables, atajos de pestañas y persistencia de sesión.
 - ✅ **Fase 4 — paridad con el panel de Warp/Terax**: filas ricas (modelo, branch,
   % contexto, msgs, tiempo relativo), filtro, preview de conversación, rename/tags/color
   (`metadata.rs`), export/import (`transfer.rs`), quota badges, cleanup. `move_session`
@@ -114,6 +139,15 @@ aterm/                         # workspace Cargo
 - **No re-implementar el VT loop**: usar `EventLoop` de alacritty_terminal (te da el
   thread de lectura/parseo). Tu listener solo reacciona a `Wakeup`/`PtyWrite`/`Title`.
 - **Render primero con egui-painter** (monoespaciado, suficiente). wgpu solo si pesa.
+- **Atajos globales en `update()` con `consume_key`** (Ctrl+Tab, Alt+1..9, Ctrl+Shift+T/W):
+  el handler por-pane solo corre con un terminal enfocado, así que los atajos que deben
+  funcionar sin foco (p.ej. reabrir tras cerrar la última pestaña) van a nivel app.
+- **cwd vivo de la shell vía `/proc/<pid>/cwd`** (solo Linux): `TermInstance::cwd()` lo
+  usa la persistencia y el reopen para volver donde estabas tras los `cd`. `None` fuera
+  de Linux → cae al cwd de lanzamiento.
+- **Menú contextual y selección local**: solo disponibles cuando el hijo NO captura el
+  ratón (sin mouse-reporting) o con Shift; el flag `ctx_menu_open` mantiene el menú
+  abierto aunque se suelte Shift dentro de una TUI.
 - Formatos de sesión por proveedor (ya implementados en `providers/`): Claude
   `~/.claude/projects/**.jsonl` + registro vivo `~/.claude/sessions/*.json`; Codex
   `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; OpenCode `opencode session list
@@ -124,7 +158,7 @@ aterm/                         # workspace Cargo
 ```bash
 cargo run -p aterm            # arrancar la app
 cargo check                   # validación rápida del workspace
-cargo test --workspace        # 59 (agent-sessions) + 11 del crate aterm (núcleo + input + helpers)
+cargo test --workspace        # 59 (agent-sessions) + 15 del crate aterm (núcleo + input + helpers)
 cargo build --release         # binario optimizado (lto thin)
 ```
 
