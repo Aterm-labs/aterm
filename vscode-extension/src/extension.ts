@@ -8,8 +8,12 @@
 // session-manager half and skip the emulator entirely.
 
 import * as cp from "child_process";
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+
+/** Filled on activate so the sidecar can be auto-located relative to the repo. */
+let extensionPath = "";
 
 /** One session as emitted by `agent-sessions-cli scan` (camelCase JSON). */
 interface Session {
@@ -45,10 +49,26 @@ interface PreviewTurn {
 
 // ── Sidecar invocation ─────────────────────────────────────────────────────
 
+/** Resolve the sidecar binary. If the user set an explicit path, honour it;
+ *  otherwise auto-locate the cargo build output relative to this repo (so a
+ *  dev-host F5 just works), falling back to a bare name on PATH. */
 function cliPath(): string {
-  return vscode.workspace
+  const configured = vscode.workspace
     .getConfiguration("agentSessions")
     .get<string>("cliPath", "agent-sessions-cli");
+  if (configured && configured !== "agent-sessions-cli") {
+    return configured; // user override
+  }
+  if (extensionPath) {
+    const candidates = [
+      path.join(extensionPath, "..", "target", "release", "agent-sessions-cli"),
+      path.join(extensionPath, "..", "target", "debug", "agent-sessions-cli"),
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) return c;
+    }
+  }
+  return "agent-sessions-cli"; // PATH lookup
 }
 
 /** Run the sidecar and parse its JSON stdout. Rejects on non-zero exit. */
@@ -275,6 +295,7 @@ async function newSession(): Promise<void> {
 // ── Activation ───────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
+  extensionPath = context.extensionPath;
   const provider = new SessionsProvider();
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("agentSessions.sessions", provider),
