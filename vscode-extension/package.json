@@ -102,6 +102,11 @@
           "type": "boolean",
           "default": true,
           "description": "Abrir las sesiones en el área del editor (pestaña a tamaño completo) en vez del panel inferior."
+        },
+        "agentSessions.closeOnExit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Cerrar el terminal completo cuando la sesión del agente termina (ejecuta `exit` al acabar)."
         }
       }
     }

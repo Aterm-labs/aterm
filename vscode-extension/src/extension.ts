@@ -245,7 +245,14 @@ function launch(name: string, cwd: string | null | undefined, argv: string[]): v
     location: inEditor ? vscode.TerminalLocation.Editor : undefined,
   });
   terminal.show();
-  terminal.sendText(shellJoin(argv), true);
+  // Run the agent, then `exit` the shell so the whole terminal closes when the
+  // session ends (`;`, not `&&`, so it closes even if the agent errors/aborts).
+  // Configurable for users who want to keep the shell afterwards.
+  const closeOnExit = vscode.workspace
+    .getConfiguration("agentSessions")
+    .get<boolean>("closeOnExit", true);
+  const line = closeOnExit ? `${shellJoin(argv)}; exit` : shellJoin(argv);
+  terminal.sendText(line, true);
 }
 
 async function resume(arg: unknown): Promise<void> {
