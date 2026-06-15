@@ -10,6 +10,7 @@
     "type": "git",
     "url": "https://github.com/Zarritas/aterm.git"
   },
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -220,10 +221,20 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["claude", "codex", "opencode", "gemini"]
+            "enum": [
+              "claude",
+              "codex",
+              "opencode",
+              "gemini"
+            ]
           },
           "uniqueItems": true,
-          "default": ["claude", "codex", "opencode", "gemini"],
+          "default": [
+            "claude",
+            "codex",
+            "opencode",
+            "gemini"
+          ],
           "description": "Proveedores visibles en el panel. Filtro de visualización: el sidecar sigue escaneando el disco, pero las sesiones de un proveedor no marcado se ocultan (y no cuentan en los contadores ni en el coste). Lista vacía = se muestran todos."
         },
         "agentSessions.fetchStatus": {
@@ -240,13 +251,20 @@
         },
         "agentSessions.tagCatalog": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Catálogo de etiquetas predefinidas. Aparecen como opciones marcables al asignar etiquetas a una sesión, para no tener que escribirlas a mano. Gestiónalo con el comando «Agent Sessions: Gestionar catálogo de etiquetas» o editando esta lista directamente."
         },
         "agentSessions.groupBy": {
           "type": "string",
-          "enum": ["provider", "project", "cascade", "date"],
+          "enum": [
+            "provider",
+            "project",
+            "cascade",
+            "date"
+          ],
           "enumDescriptions": [
             "Una rama por proveedor (Claude/Codex/…); plano dentro.",
             "Una rama por proyecto (cwd); sesiones de cualquier proveedor dentro.",
@@ -264,7 +282,8 @@
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "scripts/build-vsix.sh",
-    "publish:ovsx": "ovsx publish"
+    "publish:ovsx": "ovsx publish",
+    "build:icon": "node scripts/build-icon.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
