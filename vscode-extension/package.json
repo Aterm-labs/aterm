@@ -150,8 +150,45 @@
         "title": "Gestionar catálogo de etiquetas…",
         "category": "Agent Sessions",
         "icon": "$(tag)"
+      },
+      {
+        "command": "agentSessions.quickActions",
+        "title": "Acciones rápidas de sesión…",
+        "category": "Agent Sessions",
+        "icon": "$(list-selection)"
       }
     ],
+    "keybindings": [
+      {
+        "command": "agentSessions.quickActions",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a"
+      }
+    ],
+    "terminal": {
+      "profiles": [
+        {
+          "id": "agentSessions.terminal.claude",
+          "title": "Claude Code",
+          "icon": "comment-discussion"
+        },
+        {
+          "id": "agentSessions.terminal.codex",
+          "title": "Codex",
+          "icon": "comment-discussion"
+        },
+        {
+          "id": "agentSessions.terminal.opencode",
+          "title": "OpenCode",
+          "icon": "comment-discussion"
+        },
+        {
+          "id": "agentSessions.terminal.gemini",
+          "title": "Gemini",
+          "icon": "comment-discussion"
+        }
+      ]
+    },
     "menus": {
       "view/title": [
         {

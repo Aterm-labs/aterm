@@ -904,22 +904,85 @@ async function compactSession(view: SessionsView, s: Session): Promise<void> {
   launch(`»« ${name}`, s.cwd, argv);
 }
 
+/** Render a session's turns as a self-contained Markdown document. Shared by
+ *  the preview, "copy as Markdown" and "save as .md" actions. */
+function conversationMarkdown(s: Session, turns: PreviewTurn[]): string {
+  const body = turns
+    .map(
+      (t) => `### ${t.role === "user" ? "🧑 Usuario" : "🤖 Asistente"}\n\n${t.text}`
+    )
+    .join("\n\n---\n\n");
+  return `# ${s.title ?? s.id}\n\n${body}`;
+}
+
 async function preview(s: Session): Promise<void> {
   try {
-    const turns = await runCli<PreviewTurn[]>(["preview", s.provider, s.id]);
-    const md = turns
-      .map(
-        (t) => `### ${t.role === "user" ? "🧑 Usuario" : "🤖 Asistente"}\n\n${t.text}`
-      )
-      .join("\n\n---\n\n");
+    const turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
     const doc = await vscode.workspace.openTextDocument({
-      content: `# ${s.title ?? s.id}\n\n${md}`,
+      content: conversationMarkdown(s, turns),
       language: "markdown",
     });
     await vscode.window.showTextDocument(doc, { preview: true });
   } catch (e) {
     vscode.window.showErrorMessage(
       `Agent Sessions: previsualización no disponible (${(e as Error).message}).`
+    );
+  }
+}
+
+/** Copy the whole conversation to the clipboard as Markdown. */
+async function copyConversation(s: Session): Promise<void> {
+  try {
+    const turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
+    if (turns.length === 0) {
+      vscode.window.showInformationMessage(
+        "Agent Sessions: conversación vacía, nada que copiar."
+      );
+      return;
+    }
+    await vscode.env.clipboard.writeText(conversationMarkdown(s, turns));
+    vscode.window.showInformationMessage(
+      `Agent Sessions: conversación copiada (${turns.length} turnos).`
+    );
+  } catch (e) {
+    vscode.window.showErrorMessage(
+      `Agent Sessions: no se pudo copiar (${(e as Error).message}).`
+    );
+  }
+}
+
+/** Save the whole conversation to a chosen .md file. */
+async function saveConversation(s: Session): Promise<void> {
+  let turns: PreviewTurn[];
+  try {
+    turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
+  } catch (e) {
+    vscode.window.showErrorMessage(
+      `Agent Sessions: no se pudo leer la conversación (${(e as Error).message}).`
+    );
+    return;
+  }
+  if (turns.length === 0) {
+    vscode.window.showInformationMessage(
+      "Agent Sessions: conversación vacía, nada que guardar."
+    );
+    return;
+  }
+  const safe = (s.title ?? s.id).replace(/[^\w.-]+/g, "-").slice(0, 50);
+  const target = await vscode.window.showSaveDialog({
+    title: "Guardar conversación como Markdown",
+    defaultUri: vscode.Uri.file(path.join(os.homedir(), `${safe || s.id}.md`)),
+    filters: { Markdown: ["md"] },
+  });
+  if (!target) return;
+  try {
+    await fs.promises.writeFile(target.fsPath, conversationMarkdown(s, turns), "utf8");
+    vscode.window.showInformationMessage(
+      `Agent Sessions: guardada en ${path.basename(target.fsPath)}.`
+    );
+  } catch (e) {
+    vscode.window.showErrorMessage(
+      `Agent Sessions: no se pudo guardar (${(e as Error).message}).`
     );
   }
 }
@@ -1391,6 +1454,8 @@ async function sessionContextMenu(view: SessionsView, s: Session): Promise<void>
     { label: "$(tag) Etiquetas…", action: "tags" },
     { label: "$(symbol-color) Color…", action: "color" },
     { label: "$(cloud-download) Exportar a .zip…", action: "export" },
+    { label: "$(copy) Copiar conversación (Markdown)", action: "copyMd" },
+    { label: "$(save) Guardar conversación (.md)…", action: "saveMd" },
   ];
   if (COMPACT_PROVIDERS.has(s.provider))
     items.push({ label: "$(fold) Compactar contexto", action: "compact" });
@@ -1427,6 +1492,10 @@ async function sessionContextMenu(view: SessionsView, s: Session): Promise<void>
       return continueAsOtherAgent(view, s);
     case "compact":
       return compactSession(view, s);
+    case "copyMd":
+      return copyConversation(s);
+    case "saveMd":
+      return saveConversation(s);
   }
 }
 
@@ -2070,10 +2139,10 @@ interface LaunchTemplate {
   tags?: string[];
 }
 
-/** Save the current focus as a template: user types a name, picks a provider,
- *  optionally a prompt and cwd. Then it shows up in `runTemplate` for
- *  one-click relaunch. */
-async function saveTemplate(): Promise<void> {
+/** Save a launch template: name, provider, optional prompt, optional tags and
+ *  an optional pinned cwd. Then it shows up in `runTemplate` for one-click
+ *  relaunch. */
+async function saveTemplate(view: SessionsView): Promise<void> {
   let providers: ProviderInfo[];
   try {
     providers = await runCli<ProviderInfo[]>(["providers"]);
@@ -2103,15 +2172,25 @@ async function saveTemplate(): Promise<void> {
     placeHolder: "Vacío = sólo lanza el agente",
   });
   if (prompt === undefined) return;
-  const cwd =
-    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? undefined;
+  const tagsRaw = await vscode.window.showInputBox({
+    title: "Etiquetas de la plantilla (opcional)",
+    placeHolder: "separadas por coma o espacio",
+  });
+  if (tagsRaw === undefined) return;
+  const tags = parseTagInput(tagsRaw);
+  // Pin a directory, or leave unset so runTemplate asks at launch time. (The
+  // "no cwd" choice can't be persisted distinctly — the store omits an absent
+  // cwd — so it collapses to "ask on run", which is the sensible default.)
+  const cwd = await pickLaunchCwd(view, pick.info.id);
+  if (cwd === undefined) return; // cancelled
   const id = `tpl-${Date.now().toString(36)}`;
   const tpl: LaunchTemplate = {
     id,
     name: name.trim(),
     provider: pick.info.id,
     prompt: prompt.trim() === "" ? undefined : prompt,
-    cwd,
+    cwd: cwd ?? undefined,
+    tags: tags.length ? tags : undefined,
   };
   try {
     await runCli(["templates-set", id], JSON.stringify(tpl));
@@ -2125,7 +2204,7 @@ async function saveTemplate(): Promise<void> {
   }
 }
 
-async function runTemplate(): Promise<void> {
+async function runTemplate(view: SessionsView): Promise<void> {
   let templates: LaunchTemplate[];
   try {
     templates = (await runCli<LaunchTemplate[]>(["templates-get"])) || [];
@@ -2142,7 +2221,7 @@ async function runTemplate(): Promise<void> {
   const pick = await vscode.window.showQuickPick(
     templates.map((t) => ({
       label: `$(rocket) ${t.name}`,
-      description: t.provider,
+      description: [t.provider, ...(t.tags ?? []).map((x) => `#${x}`)].join(" · "),
       detail: t.prompt
         ? t.prompt.length > 80
           ? t.prompt.slice(0, 80) + "…"
@@ -2150,7 +2229,7 @@ async function runTemplate(): Promise<void> {
         : "(sin prompt)",
       tpl: t,
     })),
-    { placeHolder: "Plantilla a lanzar" }
+    { placeHolder: "Plantilla a lanzar", matchOnDescription: true }
   );
   if (!pick) return;
   const t = pick.tpl;
@@ -2169,11 +2248,15 @@ async function runTemplate(): Promise<void> {
     );
     return;
   }
-  const terminal = launch(
-    `🚀 ${t.name.slice(0, 30)}`,
-    t.cwd,
-    info.newSessionArgv
-  );
+  // Templates without a pinned cwd ask where to launch (instead of falling
+  // back to no directory).
+  let cwd = t.cwd;
+  if (!cwd) {
+    const picked = await pickLaunchCwd(view, t.provider);
+    if (picked === undefined) return; // cancelled
+    cwd = picked ?? undefined;
+  }
+  const terminal = launch(`🚀 ${t.name.slice(0, 30)}`, cwd, info.newSessionArgv);
   if (terminal && t.prompt) {
     setTimeout(() => terminal.sendText(t.prompt!, false), 2500);
   }
@@ -2310,6 +2393,94 @@ async function setGroupBy(view: SessionsView): Promise<void> {
   view.push();
 }
 
+// ── Quick actions palette (keyboard-first) ─────────────────────────────────
+
+/** A filterable Quick Pick of every session; choosing one opens its action
+ *  menu. Lets power users drive the whole panel from the keyboard. */
+async function quickActions(view: SessionsView): Promise<void> {
+  let sessions = view.sessionsSnapshot();
+  // The keybinding is global, so this can fire before the panel ever opened
+  // (no scan yet). Do a lazy scan before concluding there are no sessions.
+  if (sessions.length === 0) {
+    await view.refresh();
+    sessions = view.sessionsSnapshot();
+  }
+  if (sessions.length === 0) {
+    vscode.window.showInformationMessage("Agent Sessions: no hay sesiones.");
+    return;
+  }
+  const sorted = [...sessions].sort((a, b) => b.lastActivity - a.lastActivity);
+  type Item = vscode.QuickPickItem & { s: Session };
+  const items: Item[] = sorted.map((s) => {
+    const meta = view.metadataFor(s.provider, s.id);
+    const name = meta?.name?.trim() || s.title?.trim() || s.id.slice(0, 8);
+    const icon = s.isActive
+      ? s.liveStatus === "busy"
+        ? "$(sync~spin)"
+        : "$(circle-filled)"
+      : "$(history)";
+    const proj = s.cwd
+      ? view.projectAliasFor(s.cwd) || path.basename(s.cwd) || s.cwd
+      : "—";
+    const bits = [s.provider, proj];
+    if (s.model) bits.push(s.model.split("/").pop() as string);
+    if (s.costUsd) bits.push(`$${s.costUsd.toFixed(2)}`);
+    const star = meta?.favorite ? "$(star-full) " : "";
+    return {
+      label: `${icon} ${star}${name}`,
+      description: bits.join(" · "),
+      detail: s.cwd ? displayPath(s.cwd) : undefined,
+      s,
+    };
+  });
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Buscar sesión… (Enter para ver acciones)",
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (!pick) return;
+  return sessionContextMenu(view, pick.s);
+}
+
+// ── Terminal profiles (one per agent, in the terminal `+` dropdown) ─────────
+
+/** Register a VS Code terminal profile per provider so users can launch an
+ *  agent straight from the terminal panel's `+` dropdown, without the panel. */
+function registerTerminalProfiles(context: vscode.ExtensionContext): void {
+  const providers = ["claude", "codex", "opencode", "gemini"];
+  for (const id of providers) {
+    context.subscriptions.push(
+      vscode.window.registerTerminalProfileProvider(`agentSessions.terminal.${id}`, {
+        async provideTerminalProfile() {
+          let infos: ProviderInfo[];
+          try {
+            infos = await runCli<ProviderInfo[]>(["providers"]);
+          } catch (e) {
+            vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+            return undefined;
+          }
+          const info = infos.find((p) => p.id === id);
+          if (!info || !info.binaryFound || info.newSessionArgv.length === 0) {
+            vscode.window.showWarningMessage(
+              `Agent Sessions: el binario de ${info?.displayName ?? id} no está disponible en el PATH.`
+            );
+            return undefined;
+          }
+          // shellPath is the bare binary name; the integrated terminal inherits
+          // the user's shell PATH, so PATH-only installs (nvm/bun/…) resolve —
+          // same assumption as the native app's PTY launch.
+          return new vscode.TerminalProfile({
+            name: info.displayName,
+            shellPath: info.newSessionArgv[0],
+            shellArgs: info.newSessionArgv.slice(1),
+            cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          });
+        },
+      })
+    );
+  }
+}
+
 // ── Activation ───────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -2345,11 +2516,18 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentSessions.searchContent", () =>
       searchContent(view)
     ),
-    vscode.commands.registerCommand("agentSessions.runTemplate", runTemplate),
-    vscode.commands.registerCommand("agentSessions.saveTemplate", saveTemplate),
+    vscode.commands.registerCommand("agentSessions.runTemplate", () =>
+      runTemplate(view)
+    ),
+    vscode.commands.registerCommand("agentSessions.saveTemplate", () =>
+      saveTemplate(view)
+    ),
     vscode.commands.registerCommand("agentSessions.manageTemplates", manageTemplates),
     vscode.commands.registerCommand("agentSessions.manageTagCatalog", () =>
       manageTagCatalog(view)
+    ),
+    vscode.commands.registerCommand("agentSessions.quickActions", () =>
+      quickActions(view)
     ),
     vscode.commands.registerCommand("agentSessions.setFilter", () => setFilter(view)),
     vscode.commands.registerCommand("agentSessions.clearFilter", () => {
@@ -2376,6 +2554,7 @@ export function activate(context: vscode.ExtensionContext): void {
         view.push();
     })
   );
+  registerTerminalProfiles(context);
 }
 
 export function deactivate(): void {}

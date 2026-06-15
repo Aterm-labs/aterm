@@ -75,6 +75,14 @@ que usa la app nativa, así ambas UIs ven la misma metadata.
 - ✅ Búsqueda en el **contenido** de las conversaciones (FTS) vía `search-content`.
 - ✅ Ajustes de **proveedores visibles** (`scanProviders`), **interruptor de red**
   (`fetchStatus`) y **auto-refresco completo** periódico (`refreshSec`).
+- ✅ **Terminal Profiles por proveedor**: Claude/Codex/OpenCode/Gemini en el
+  desplegable `+` del terminal integrado.
+- ✅ **Paleta de acciones** (`Ctrl/Cmd+Alt+A`): quick-pick de todas las sesiones
+  → menú de acciones, sin ratón.
+- ✅ **Copiar/guardar la conversación** como Markdown (portapapeles o `.md`).
+- ✅ **Modo compacto** (toggle de densidad en la barra) para ver más sesiones.
+- ✅ **Plantillas con etiquetas y cwd**: al guardar pides tags y directorio; al
+  lanzar, pregunta el cwd si la plantilla no lo fija.
 
 ## Instalar
 

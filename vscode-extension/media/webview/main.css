@@ -784,3 +784,30 @@ body {
   color: var(--vscode-descriptionForeground);
   font-size: calc(var(--vscode-font-size) - 1px);
 }
+
+/* ── Densidad compacta (toggle del header) ─────────────────────────────── */
+/* Aprieta verticales para ver más sesiones de un vistazo, sin ocultar info. */
+body.compact {
+  --row-pad-y: 3px;
+  --row-pad-x: 8px;
+}
+body.compact .cards {
+  gap: 0;
+}
+body.compact .card {
+  row-gap: 0;
+  column-gap: 8px;
+  grid-template-columns: 20px 1fr auto;
+}
+body.compact .card .avatar {
+  width: 20px;
+  height: 20px;
+  font-size: 10px;
+}
+body.compact .card .meta {
+  font-size: calc(var(--vscode-font-size) - 2px);
+}
+body.compact .bucket {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}

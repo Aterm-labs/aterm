@@ -47,6 +47,7 @@ try {
   if (ui.showStats == null) ui.showStats = false;
   // Older persisted state may predate `collapsed`; every consumer indexes it.
   if (ui.collapsed == null || typeof ui.collapsed !== "object") ui.collapsed = {};
+  if (ui.density !== "compact") ui.density = "comfortable";
 
   const NO_PROJECT = "(sin proyecto)";
 
@@ -1411,6 +1412,24 @@ try {
     ].some((b) => b.getAttribute("aria-expanded") === "true");
     setAllCollapsed(anyExpanded);
   });
+
+  // Density toggle: comfortable ↔ compact (tighter cards, still two lines). Persisted.
+  function applyDensity() {
+    document.body.classList.toggle("compact", ui.density === "compact");
+  }
+  const densityBtn = document.getElementById("action-density");
+  function updateDensityBtn() {
+    densityBtn.classList.toggle("active", ui.density === "compact");
+    densityBtn.setAttribute("aria-pressed", ui.density === "compact" ? "true" : "false");
+  }
+  densityBtn.addEventListener("click", () => {
+    ui.density = ui.density === "compact" ? "comfortable" : "compact";
+    vscode.setState(ui);
+    applyDensity();
+    updateDensityBtn();
+  });
+  applyDensity();
+  updateDensityBtn();
   document
     .getElementById("action-refresh")
     .addEventListener("click", () => post("refresh"));
@@ -1450,8 +1469,10 @@ try {
     ui: () => ui,
     rerender: () => render(),
     resetUi: () => {
-      ui = { collapsed: {}, showStats: false };
+      ui = { collapsed: {}, showStats: false, density: "comfortable" };
       vscode.setState(ui);
+      applyDensity();
+      updateDensityBtn();
       render();
     },
   });

@@ -140,7 +140,10 @@ construye el sidecar para esa plataforma y lo empaqueta en el `.vsix` bajo
   **nueva sesión eligiendo cwd** (workspace / cwd conocido del proveedor con
   alias / otra ruta vía showOpenDialog; + acciones rápidas «nueva sesión aquí» y
   «abrir terminal aquí» en cada cabecera de bucket de proyecto), **plegar/desplegar
-  todo** (botón en la barra), y tres settings: `scanProviders` (proveedores visibles, filtrado en
+  todo** (botón en la barra), **terminal profiles por proveedor** (en el `+` del
+  terminal), **paleta de acciones** (`Ctrl/Cmd+Alt+A` → quick-pick de sesiones),
+  **copiar/guardar conversación** como Markdown, **modo compacto** (toggle de
+  densidad) y **plantillas con tags + cwd elegible**, y tres settings: `scanProviders` (proveedores visibles, filtrado en
   display; el escaneo sigue), `fetchStatus` (interruptor de red para
   statuspage+quota, default on, paridad con `fetch_status` nativo) y `refreshSec`
   (auto-rescan completo periódico, 0 = off, <15 → 15). Estado UI (colapsado,
