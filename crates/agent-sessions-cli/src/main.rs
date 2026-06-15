@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use agent_sessions::metadata::{MetadataStore, SessionMetadata};
 use agent_sessions::provider::{binary_in_path, AgentProvider};
 use agent_sessions::transfer::{
-    export_sessions, import_archive_routed, move_session, ExportItem,
+    export_sessions, import_archive_routed, move_session, read_manifest, ExportItem,
 };
 use agent_sessions::types::{
     AgentProviderInfo, DeleteError, ProviderQuota, QuotaWindow, ServiceStatus,
@@ -64,6 +64,9 @@ fn main() {
         "projects-clear" => projects_clear(args.get(1)),
         "export" => export(args.get(1), args.get(2), args.get(3)),
         "import" => import(args.get(1)),
+        "archive" => archive_cmd(args.get(1), args.get(2)),
+        "unarchive" => unarchive_cmd(args.get(1), args.get(2)),
+        "archive-restore" => archive_restore_cmd(args.get(1), args.get(2)),
         "delete" => delete(args.get(1), args.get(2), args.get(3)),
         "move" => move_cmd(args.get(1), args.get(2), args.get(3)),
         "serve" => serve(),
@@ -79,8 +82,9 @@ fn main() {
             "comando desconocido: {other:?}\nuso: agent-sessions-cli \
              <scan|providers|preview|resume-argv|new-argv|compact-argv|metadata-get|\
              metadata-set|metadata-clear|projects-get|projects-set|projects-clear|\
-             export|import|delete|move|serve|backup|restore|service-status|live|\
-             search-content|templates-get|templates-set|templates-delete> [args]"
+             export|import|archive|unarchive|archive-restore|delete|move|serve|\
+             backup|restore|service-status|live|search-content|templates-get|\
+             templates-set|templates-delete> [args]"
         )),
     }
 }
@@ -123,6 +127,10 @@ fn scan() {
         "providers": infos,
         "sessions": sessions,
         "quotas": quotas,
+        // Durable snapshots under ~/.config/aterm/archive. The frontend merges
+        // these in so a persisted session still shows even if its provider
+        // deleted the original.
+        "archived": archive_entries(),
     }));
 }
 
@@ -255,6 +263,13 @@ fn apply_patch(m: &mut SessionMetadata, patch: &serde_json::Value) {
             m.favorite = b;
         } else if v.is_null() {
             m.favorite = false;
+        }
+    }
+    if let Some(v) = patch.get("persisted") {
+        if let Some(b) = v.as_bool() {
+            m.persisted = b;
+        } else if v.is_null() {
+            m.persisted = false;
         }
     }
 }
@@ -475,6 +490,150 @@ fn import(zip: Option<&String>) {
     }
 }
 
+/// Flip a session's `persisted` flag in the shared metadata store.
+fn set_persisted(provider: &str, id: &str, value: bool) {
+    let path = metadata_path();
+    let mut store = MetadataStore::load(&path);
+    store.update(provider, id, |m| m.persisted = value);
+    let _ = store.save(&path);
+}
+
+/// `archive <provider> <id>` → durable snapshot under
+/// `~/.config/aterm/archive/<provider>/<id>.zip` (reusing the export format),
+/// then mark the session `persisted`. Written atomically via a `.tmp` rename
+/// so a crash can't leave a truncated zip.
+fn archive_cmd(provider: Option<&String>, id: Option<&String>) {
+    let (p, sid) = match (find(provider), id) {
+        (Some(p), Some(id)) => (p, id.clone()),
+        _ => fail("uso: archive <provider> <session-id>"),
+    };
+    let session = p
+        .list_sessions()
+        .unwrap_or_else(|e| fail(&format!("scan falló: {e}")))
+        .into_iter()
+        .find(|s| s.id == sid)
+        .unwrap_or_else(|| fail("sesión no encontrada"));
+    let store = MetadataStore::load(&metadata_path());
+    let meta = store.get(p.id(), &sid);
+    let item = ExportItem {
+        session_id: sid.clone(),
+        display_name: meta.and_then(|m| m.name.clone()),
+        tags: meta.map(|m| m.tags.clone()).unwrap_or_default(),
+    };
+    let dir = archive_dir().join(p.id());
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        fail(&format!("no se pudo crear el archive: {e}"));
+    }
+    let dest = dir.join(format!("{sid}.zip"));
+    let tmp = dir.join(format!("{sid}.zip.tmp"));
+    let written = match export_sessions(&[(session, item)], |id| p.locate(id), &tmp) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            fail(&format!("archive falló: {e}"));
+        }
+    };
+    if written == 0 {
+        // Nothing on disk to snapshot (provider doesn't store a locatable file).
+        let _ = std::fs::remove_file(&tmp);
+        emit(&serde_json::json!({ "written": 0 }));
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        let _ = std::fs::remove_file(&tmp);
+        fail(&format!("no se pudo finalizar el archive: {e}"));
+    }
+    set_persisted(p.id(), &sid, true);
+    emit(&serde_json::json!({ "written": written, "dest": dest }));
+}
+
+/// `unarchive <provider> <id>` → clear `persisted` and drop the snapshot.
+fn unarchive_cmd(provider: Option<&String>, id: Option<&String>) {
+    let (provider, id) = match (provider, id) {
+        (Some(p), Some(i)) => (p.clone(), i.clone()),
+        _ => fail("uso: unarchive <provider> <session-id>"),
+    };
+    set_persisted(&provider, &id, false);
+    let zip = archive_dir().join(&provider).join(format!("{id}.zip"));
+    let _ = std::fs::remove_file(&zip);
+    emit(&serde_json::json!({ "ok": true }));
+}
+
+/// `archive-restore <provider> <id>` → re-materialise the snapshot into
+/// Claude's project tree so `--resume` works again. Claude-only (the import
+/// router assumes Claude's on-disk layout). The snapshot is kept as backup.
+fn archive_restore_cmd(provider: Option<&String>, id: Option<&String>) {
+    let (provider, id) = match (provider, id) {
+        (Some(p), Some(i)) => (p.clone(), i.clone()),
+        _ => fail("uso: archive-restore <provider> <session-id>"),
+    };
+    // The import router only knows Claude's on-disk layout; reject other
+    // providers here so the CLI is safe regardless of caller (it's also an
+    // MCP surface), not only when driven by the extension's TS guard.
+    if provider != "claude" {
+        fail("restaurar solo está soportado para Claude por ahora");
+    }
+    let zip = archive_dir().join(&provider).join(format!("{id}.zip"));
+    if !zip.exists() {
+        fail("no hay copia archivada de esta sesión");
+    }
+    let projects = home_dir().join(".claude/projects");
+    let fallback = projects.join("aterm-imported");
+    match import_archive_routed(&zip, &projects, &fallback, encode_cwd) {
+        Ok(o) => emit(&serde_json::to_value(o).unwrap_or(serde_json::Value::Null)),
+        Err(e) => fail(&format!("restore falló: {e}")),
+    }
+}
+
+/// List every archived snapshot by reading each zip's manifest. Used by `scan`
+/// to merge persisted sessions into the panel even when the original is gone.
+fn archive_entries() -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let root = archive_dir();
+    let Ok(providers) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    for pe in providers.flatten() {
+        if !pe.path().is_dir() {
+            continue;
+        }
+        let provider = pe.file_name().to_string_lossy().to_string();
+        let Ok(zips) = std::fs::read_dir(pe.path()) else {
+            continue;
+        };
+        for ze in zips.flatten() {
+            let path = ze.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("zip") {
+                continue;
+            }
+            let archived_at = ze
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            // A corrupt/unreadable snapshot is skipped rather than aborting the scan.
+            let Ok(infos) = read_manifest(&path) else {
+                continue;
+            };
+            for info in infos {
+                out.push(serde_json::json!({
+                    "provider": provider,
+                    "id": info.id,
+                    "cwd": info.cwd,
+                    "title": info.first_prompt.clone().or_else(|| info.display_name.clone()),
+                    "displayName": info.display_name,
+                    "firstPrompt": info.first_prompt,
+                    "tags": info.tags,
+                    "archivedAt": archived_at,
+                }));
+            }
+        }
+    }
+    out
+}
+
 fn provider_info(p: &Box<dyn AgentProvider>) -> AgentProviderInfo {
     AgentProviderInfo {
         id: p.id().to_string(),
@@ -505,6 +664,13 @@ fn metadata_path() -> PathBuf {
 /// `ProjectNames` store, so renames are visible across UIs.
 fn projects_path() -> PathBuf {
     home_dir().join(".config/aterm/project-names.json")
+}
+
+/// Durable session snapshots, one `.zip` per session under
+/// `<archive>/<provider>/<id>.zip`. Survives provider-side cleanup; shared
+/// with the native app.
+fn archive_dir() -> PathBuf {
+    home_dir().join(".config/aterm/archive")
 }
 
 fn emit(value: &serde_json::Value) {

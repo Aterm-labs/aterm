@@ -68,6 +68,7 @@ try {
     terminal: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="M2 2.5h12a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm1.8 3-.9.9 2.2 2-2.2 2 .9.9L7 8.4 3.8 5.5ZM8 9.5h4.2v1.2H8V9.5Z"/></svg>`,
     star: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="m8 1.5 1.93 4.18 4.57.43-3.45 3.04 1.02 4.5L8 11.27 3.93 13.65l1.02-4.5L1.5 6.11l4.57-.43L8 1.5Z"/></svg>`,
     note: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="M3 2h7l3 3v9H3V2Zm6.5 4V3L12 6H9.5ZM5 8h6v1H5V8Zm0 2.5h6v1H5v-1Z"/></svg>`,
+    archive: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="M1.5 2h13v3h-13V2Zm1 4h11v8h-11V6Zm3.5 2v1.5h4V8H6Z"/></svg>`,
   };
 
   // ── Provider colours (theme-aware via CSS vars) ──────────────────────────
@@ -236,6 +237,8 @@ try {
         if (value === "color") return !!(m && m.color);
         if (value === "model") return !!s.model;
         if (value === "branch") return !!s.branch;
+        if (value === "persisted" || value === "archived")
+          return s.archivedOnly === true || !!(m && m.persisted);
         return false;
       }
       case "active":
@@ -952,8 +955,9 @@ try {
       `(sin título) ${s.id.slice(0, 8)}`;
     const accent = s.cwd ? state.projects.colors[s.cwd] : null;
     const inUse = state.activeKeys.includes(`${s.provider}:${s.id}`);
-    // Only Claude's on-disk layout is supported by `move_session` today.
-    const dragOk = s.provider === "claude" && !!s.cwd;
+    // Only Claude's on-disk layout is supported by `move_session` today, and
+    // an archived-only session has no original jsonl to move.
+    const dragOk = s.provider === "claude" && !!s.cwd && !s.archivedOnly;
     const node = el("div", {
       class: `card ${inUse ? "in-use" : ""}`,
       role: "treeitem",
@@ -1076,10 +1080,25 @@ try {
         })
       );
     }
+    // Archive indicator: blue box if a durable snapshot exists. For an
+    // archived-only session (Claude deleted the original) it reads "restaurable".
+    if (s.archivedOnly || (m && m.persisted)) {
+      node.appendChild(
+        el("span", {
+          class: `archive-indicator ${s.archivedOnly ? "orphan" : ""}`,
+          title: s.archivedOnly
+            ? "Archivada (original borrado) — clic en la tarjeta para restaurar y reanudar"
+            : "Persistida: copia durable (del estado al marcar) bajo ~/.config/aterm/archive",
+          html: ICONS.archive,
+        })
+      );
+    }
 
-    // Hover actions (right side).
+    // Hover actions (right side). Archived-only cards (original deleted) only
+    // support resume-via-restore and the (reduced) "More…" menu — favourite
+    // and preview would hit the missing original.
     const actions = el("span", { class: "actions" });
-    if (!(m && m.favorite)) {
+    if (!s.archivedOnly && !(m && m.favorite)) {
       actions.appendChild(
         actionBtn("Marcar favorito", ICONS.star, (e) => {
           e.stopPropagation();
@@ -1088,17 +1107,19 @@ try {
       );
     }
     actions.appendChild(
-      actionBtn("Reanudar", ICONS.play, (e) => {
+      actionBtn(s.archivedOnly ? "Restaurar y reanudar" : "Reanudar", ICONS.play, (e) => {
         e.stopPropagation();
         post("resume", { provider: s.provider, id: s.id });
       })
     );
-    actions.appendChild(
-      actionBtn("Previsualizar", ICONS.eye, (e) => {
-        e.stopPropagation();
-        post("preview", { provider: s.provider, id: s.id });
-      })
-    );
+    if (!s.archivedOnly) {
+      actions.appendChild(
+        actionBtn("Previsualizar", ICONS.eye, (e) => {
+          e.stopPropagation();
+          post("preview", { provider: s.provider, id: s.id });
+        })
+      );
+    }
     actions.appendChild(
       actionBtn("Más…", ICONS.more, (e) => {
         e.stopPropagation();

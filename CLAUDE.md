@@ -85,7 +85,7 @@ construye el sidecar para esa plataforma y lo empaqueta en el `.vsix` bajo
   estilos, cursor, selección), input teclado→bytes, scrollback, zoom y copy/paste.
 - ✅ **Panel con paridad funcional**: filas ricas, filtro, badges de quota, preview,
   rename/tags/color (metadata persistida), export/import y cleanup.
-- ✅ **Tests verdes**: 59 en `agent-sessions` + 15 del crate `aterm` (e2e del núcleo:
+- ✅ **Tests verdes**: 60 en `agent-sessions` + 15 del crate `aterm` (e2e del núcleo:
   salida del hijo, input echo, exit code; + URL/www/mailto/file, ratón SGR/X10,
   helpers de sesión/status). Release con `lto thin` compila.
 - ✅ **Salida del hijo**: al terminar (`exit`/Ctrl+D) la pestaña muestra `[exited N]`
@@ -225,16 +225,18 @@ construye el sidecar para esa plataforma y lo empaqueta en el `.vsix` bajo
 ```bash
 cargo run -p aterm            # arrancar la app
 cargo check                   # validación rápida del workspace
-cargo test --workspace        # 59 (agent-sessions) + 15 del crate aterm (núcleo + input + helpers)
+cargo test --workspace        # 60 (agent-sessions) + 15 del crate aterm (núcleo + input + helpers)
 cargo build --release         # binario optimizado (lto thin)
 ```
 
 ## Sincronizar el vendor con upstream
 
 `agent-sessions` es copia verbatim de `../warp/crates/warp_agent_history/src/`.
-Si mejoras la lógica de sesiones allí (o al revés), re-copia y re-aplica las dos
+Si mejoras la lógica de sesiones allí (o al revés), re-copia y re-aplica las tres
 divergencias: (1) quitar `pub mod service_status;` de `lib.rs`; (2) declarar
 `windows-sys` como dep `[target.'cfg(windows)'.dependencies]` en `Cargo.toml`
 (la usa `live.rs::pid_alive`; upstream la hereda del workspace de Warp y al
-vendorizar se pierde → rompe el build de Windows). La interop de export/import
+vendorizar se pierde → rompe el build de Windows); (3) el campo
+`SessionMetadata::persisted` en `metadata.rs` (flag de archivado durable; va en
+`is_empty()`) — replicarlo upstream para no divergir. La interop de export/import
 es **byte-compatible** con multi-claude y el panel de Terax — no romper el manifest.

@@ -860,3 +860,28 @@ body.compact .bucket {
   color: inherit;
   border-radius: 2px;
 }
+
+/* ── Indicador de sesión persistida / archivada ────────────────────────── */
+.card .archive-indicator {
+  position: absolute;
+  top: 6px;
+  right: 38px;
+  width: 12px;
+  height: 12px;
+  color: var(--vscode-charts-blue);
+  pointer-events: none;
+}
+/* Naranja cuando el original ya no existe (solo vive la copia archivada). */
+.card .archive-indicator.orphan {
+  color: var(--vscode-charts-orange);
+}
+.card .archive-indicator svg {
+  width: 12px;
+  height: 12px;
+}
+/* Hide on hover/focus so it doesn't sit under the hover action buttons,
+   matching .note-indicator / .star.pinned. */
+.card:hover .archive-indicator,
+.card:focus-within .archive-indicator {
+  display: none;
+}

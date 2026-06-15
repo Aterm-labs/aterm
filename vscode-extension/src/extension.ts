@@ -44,6 +44,9 @@ interface Session {
   contextWindow: number | null;
   costUsd: number | null;
   resumeArgv: string[];
+  /** Synthesised from a durable archive whose original was deleted by the
+   *  provider. Resuming it restores the snapshot first. */
+  archivedOnly?: boolean;
 }
 
 interface ProviderInfo {
@@ -85,6 +88,19 @@ interface ScanResult {
   providers: ProviderInfo[];
   sessions: Session[];
   quotas?: Record<string, ProviderQuota>;
+  archived?: ArchivedEntry[];
+}
+
+/** One durable snapshot under ~/.config/aterm/archive (from its zip manifest). */
+interface ArchivedEntry {
+  provider: string;
+  id: string;
+  cwd: string | null;
+  title: string | null;
+  displayName: string | null;
+  firstPrompt: string | null;
+  tags: string[];
+  archivedAt: number;
 }
 
 interface PreviewTurn {
@@ -98,6 +114,7 @@ interface SessionMetadata {
   color?: string | null;
   notes?: string | null;
   favorite?: boolean;
+  persisted?: boolean;
 }
 
 interface ImportOutcome {
@@ -566,6 +583,15 @@ class SessionsView implements vscode.WebviewViewProvider {
     const sessions = this.scan.sessions.filter((s) => enabled.has(s.provider));
     const providers = this.scan.providers.filter((p) => enabled.has(p.id));
 
+    // Merge in archived sessions whose original was deleted by the provider:
+    // synthesise a session card so they stay visible and restorable.
+    const live = new Set(sessions.map((s) => `${s.provider}:${s.id}`));
+    for (const a of this.scan.archived || []) {
+      if (!enabled.has(a.provider)) continue;
+      if (live.has(`${a.provider}:${a.id}`)) continue; // original still around
+      sessions.push(archivedToSession(a));
+    }
+
     // Statuspage health is network-derived; quota is read from local files but
     // is gated by the same `fetchStatus` switch to mirror the native app
     // (it groups both under one "consult status" toggle). Both are suppressed
@@ -605,7 +631,8 @@ class SessionsView implements vscode.WebviewViewProvider {
         (entry.tags && entry.tags.length) ||
         entry.color ||
         entry.notes ||
-        entry.favorite)
+        entry.favorite ||
+        entry.persisted)
     ) {
       this.metadata[key] = entry;
     } else {
@@ -701,7 +728,12 @@ class SessionsView implements vscode.WebviewViewProvider {
         return importArchive(this);
       case "resume": {
         const s = this.findSession(msg.provider, msg.id);
-        if (s) await resumeSession(this, s, this.metadataFor(s.provider, s.id));
+        if (s) {
+          await resumeSession(this, s, this.metadataFor(s.provider, s.id));
+          return;
+        }
+        const a = this.findArchived(msg.provider, msg.id);
+        if (a) await resumeArchived(this, a.provider, a.id, a.cwd, a.title);
         return;
       }
       case "preview": {
@@ -711,7 +743,12 @@ class SessionsView implements vscode.WebviewViewProvider {
       }
       case "contextMenu": {
         const s = this.findSession(msg.provider, msg.id);
-        if (s) await sessionContextMenu(this, s);
+        if (s) {
+          await sessionContextMenu(this, s);
+          return;
+        }
+        const a = this.findArchived(msg.provider, msg.id);
+        if (a) await sessionContextMenu(this, archivedToSession(a));
         return;
       }
       case "renameProject":
@@ -745,6 +782,12 @@ class SessionsView implements vscode.WebviewViewProvider {
 
   private findSession(provider: string, id: string): Session | undefined {
     return this.scan.sessions.find((s) => s.provider === provider && s.id === id);
+  }
+
+  private findArchived(provider: string, id: string): ArchivedEntry | undefined {
+    return (this.scan.archived || []).find(
+      (a) => a.provider === provider && a.id === id
+    );
   }
 
   private renderHtml(webview: vscode.Webview, mediaRoot: vscode.Uri): string {
@@ -1455,6 +1498,21 @@ const COLOR_PALETTE: { label: string; hex: string | null }[] = [
  *  we used to expose via contextValue + view/item/context. */
 async function sessionContextMenu(view: SessionsView, s: Session): Promise<void> {
   const meta = view.metadataFor(s.provider, s.id);
+  // Archived-only sessions (original deleted by the provider) get a reduced
+  // menu: restore+resume, or stop persisting (which drops the snapshot).
+  if (s.archivedOnly) {
+    const pick = await vscode.window.showQuickPick(
+      [
+        { label: "$(play) Restaurar y reanudar", action: "resumeArchived" },
+        { label: "$(inbox) No persistir (eliminar copia)", action: "archive" },
+      ],
+      { placeHolder: `${s.title || s.id} · archivada` }
+    );
+    if (!pick) return;
+    if (pick.action === "resumeArchived")
+      return resumeArchived(view, s.provider, s.id, s.cwd, s.title);
+    return toggleArchived(view, s);
+  }
   const items: { label: string; action: string }[] = [
     { label: "$(play) Reanudar", action: "resume" },
     { label: "$(comment) Reanudar con prompt…", action: "resumeWithPrompt" },
@@ -1464,6 +1522,19 @@ async function sessionContextMenu(view: SessionsView, s: Session): Promise<void>
       label: meta?.favorite ? "$(star-full) Quitar favorito" : "$(star) Marcar favorito",
       action: "favorite",
     },
+    // Persist is Claude-only for now: archiving works for any provider, but
+    // restore/resume of an archived snapshot is Claude-only, so offering it
+    // elsewhere would create a non-restorable dead-end.
+    ...(s.provider === "claude"
+      ? [
+          {
+            label: meta?.persisted
+              ? "$(inbox) No persistir"
+              : "$(archive) Persistir (copia durable)",
+            action: "archive",
+          },
+        ]
+      : []),
     { label: "$(edit) Renombrar…", action: "rename" },
     { label: "$(note) Notas…", action: "notes" },
     { label: "$(tag) Etiquetas…", action: "tags" },
@@ -1511,6 +1582,8 @@ async function sessionContextMenu(view: SessionsView, s: Session): Promise<void>
       return copyConversation(s);
     case "saveMd":
       return saveConversation(s);
+    case "archive":
+      return toggleArchived(view, s);
   }
 }
 
@@ -1648,6 +1721,103 @@ async function editNotes(view: SessionsView, s: Session): Promise<void> {
 async function toggleFavorite(view: SessionsView, s: Session): Promise<void> {
   const meta = view.metadataFor(s.provider, s.id);
   await patchMetadata(view, s.provider, s.id, { favorite: !meta?.favorite });
+}
+
+/** Synthesise a session card from an archived snapshot (its original was
+ *  deleted by the provider). Resuming it restores the snapshot first. */
+function archivedToSession(a: ArchivedEntry): Session {
+  return {
+    provider: a.provider,
+    id: a.id,
+    title: a.title ?? a.firstPrompt ?? null,
+    cwd: a.cwd,
+    branch: null,
+    messageCount: null,
+    lastActivity: a.archivedAt,
+    isActive: false,
+    liveStatus: null,
+    model: null,
+    contextTokens: null,
+    contextWindow: null,
+    costUsd: null,
+    resumeArgv: [],
+    archivedOnly: true,
+  };
+}
+
+/** Persist (durable snapshot) or un-persist a session. The sidecar sets the
+ *  metadata flag and writes/drops the snapshot zip; we re-scan to refresh both
+ *  the badge and the archived list. */
+async function toggleArchived(view: SessionsView, s: Session): Promise<void> {
+  // For an archived-only card the snapshot is the source of truth (its
+  // metadata may be momentarily absent), so always treat it as persisted →
+  // the toggle un-persists (drops the snapshot) instead of trying to archive
+  // a non-existent original.
+  const persisted = s.archivedOnly === true || !!view.metadataFor(s.provider, s.id)?.persisted;
+  try {
+    if (persisted) {
+      await runCli(["unarchive", s.provider, s.id]);
+      vscode.window.showInformationMessage(
+        "Agent Sessions: la sesión ya no se persiste (copia eliminada)."
+      );
+    } else {
+      const r = await runCli<{ written: number }>(["archive", s.provider, s.id]);
+      if (!r || r.written === 0) {
+        vscode.window.showWarningMessage(
+          "Agent Sessions: nada que persistir (sesión no localizada en disco)."
+        );
+        return;
+      }
+      vscode.window.showInformationMessage(
+        "Agent Sessions: sesión persistida — copia durable creada bajo ~/.config/aterm/archive."
+      );
+    }
+  } catch (e) {
+    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    return;
+  }
+  await view.refresh();
+}
+
+/** Resume an archived-only session: restore its snapshot into Claude's tree,
+ *  then launch the resume. Claude-only (the restore router assumes Claude). */
+async function resumeArchived(
+  view: SessionsView,
+  provider: string,
+  id: string,
+  cwd: string | null,
+  title: string | null
+): Promise<void> {
+  if (provider !== "claude") {
+    vscode.window.showWarningMessage(
+      "Agent Sessions: restaurar y reanudar una sesión archivada solo está soportado para Claude por ahora."
+    );
+    return;
+  }
+  try {
+    await runCli(["archive-restore", provider, id]);
+  } catch (e) {
+    vscode.window.showErrorMessage(
+      `Agent Sessions: no se pudo restaurar (${(e as Error).message}).`
+    );
+    return;
+  }
+  // Same single-process invariant as resumeSession: never put two
+  // `claude --resume` on one transcript.
+  if (view.focusActiveTerminal(provider, id)) {
+    await view.refresh();
+    return;
+  }
+  let argv: string[];
+  try {
+    argv = (await runCli<string[]>(["resume-argv", provider, id])) || [];
+  } catch (e) {
+    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    return;
+  }
+  const terminal = launch(`▶ ${(title || id).slice(0, 30)}`, cwd, argv);
+  if (terminal) view.registerTerminal(provider, id, terminal);
+  await view.refresh();
 }
 
 /** Two-step destructive flow: a warning modal, then a second prompt if the
@@ -1883,6 +2053,7 @@ interface MetadataPatch {
   color?: string | null;
   notes?: string | null;
   favorite?: boolean;
+  persisted?: boolean;
 }
 
 async function patchMetadata(

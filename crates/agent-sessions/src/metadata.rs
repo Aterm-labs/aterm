@@ -30,6 +30,10 @@ pub struct SessionMetadata {
     /// Pin-to-top flag.
     #[serde(skip_serializing_if = "is_false", default)]
     pub favorite: bool,
+    /// Marked for durable archival: the panel keeps a snapshot under
+    /// `~/.config/aterm/archive` so the session survives provider-side cleanup.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub persisted: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -43,6 +47,7 @@ impl SessionMetadata {
             && self.color.is_none()
             && self.notes.is_none()
             && !self.favorite
+            && !self.persisted
     }
 }
 
@@ -161,5 +166,23 @@ mod tests {
     #[test]
     fn missing_file_is_empty() {
         assert!(MetadataStore::load(std::path::Path::new("/no/such/file")).all_tags().is_empty());
+    }
+
+    #[test]
+    fn persisted_roundtrip_and_byte_stable() {
+        // `false` is omitted entirely → byte-stable store, interop-safe.
+        let mut m = SessionMetadata::default();
+        assert_eq!(serde_json::to_string(&m).unwrap(), "{}");
+        m.persisted = true;
+        assert_eq!(serde_json::to_string(&m).unwrap(), "{\"persisted\":true}");
+        // Older files without the key load with persisted=false.
+        let old: SessionMetadata = serde_json::from_str("{\"favorite\":true}").unwrap();
+        assert!(!old.persisted && old.favorite);
+        // A persisted-only entry must NOT be pruned (it's the durable marker).
+        let mut s = MetadataStore::default();
+        s.update("claude", "z", |m| m.persisted = true);
+        assert!(s.get("claude", "z").is_some());
+        s.update("claude", "z", |m| m.persisted = false);
+        assert!(s.get("claude", "z").is_none());
     }
 }
