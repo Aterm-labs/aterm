@@ -23,3 +23,20 @@ serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Used by `cargo deb` (the release workflow) to build the .deb package.
+# Runtime deps cover the egui/eframe stack on Wayland and X11 hosts.
+[package.metadata.deb]
+maintainer = "Jesús Lorenzo <jesus.lorenzo@factorlibre.com>"
+copyright = "2026, Factor Libre — MIT licensed"
+section = "utils"
+priority = "optional"
+extended-description = """\
+aterm is a native terminal that bundles a session manager for coding-agent
+CLIs (Claude Code, Codex, OpenCode, Gemini). Lists, previews and resumes
+sessions from a side panel; the terminal itself is built on alacritty_terminal."""
+depends = "$auto, libxkbcommon0, libwayland-client0, libxcb1, libgl1, libfontconfig1"
+assets = [
+    ["target/release/aterm", "usr/bin/", "755"],
+    ["target/release/agent-sessions-cli", "usr/bin/", "755"],
+]

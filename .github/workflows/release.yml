@@ -1,0 +1,213 @@
+# Release pipeline — builds the native app as `.deb` and the VS Code
+# extension as `.vsix` for every supported platform, then attaches all the
+# artefacts to a GitHub Release.
+#
+# Triggers:
+#   - tag push `v*` (canonical release)
+#   - manual via `workflow_dispatch` (dry-run from the Actions tab; no release)
+#
+# Each artefact is uploaded with `actions/upload-artifact`, so manual runs
+# can still download from the run summary even when no release is cut.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Debian packages (.deb) ──────────────────────────────────────────────
+  build-deb:
+    name: deb · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: deb-${{ matrix.target }}
+
+      - name: System deps (egui/eframe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgl1-mesa-dev libfontconfig1-dev libxkbcommon-x11-dev \
+            libssl-dev
+
+      - name: Cross-compile toolchain (arm64 only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture arm64
+          # Restrict the existing sources to amd64 only so apt doesn't try
+          # to fetch arm64 from archive.ubuntu.com (which is amd64/i386 only)
+          # and replace them with the ports mirror for arm64.
+          sudo sed -i 's|^deb |deb [arch=amd64,i386] |g' /etc/apt/sources.list
+          sudo tee /etc/apt/sources.list.d/arm64.list > /dev/null <<'EOF'
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security main universe
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libxkbcommon-dev:arm64 libwayland-dev:arm64 \
+            libxcb1-dev:arm64 libgl1-mesa-dev:arm64 libfontconfig1-dev:arm64 \
+            libxkbcommon-x11-dev:arm64 libssl-dev:arm64
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+          {
+            echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+            echo "PKG_CONFIG_ALLOW_CROSS=1"
+            echo "PKG_CONFIG_SYSROOT_DIR=/"
+          } >> "$GITHUB_ENV"
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p aterm
+          cargo build --release --target ${{ matrix.target }} -p agent-sessions-cli
+
+      - name: Package .deb
+        run: |
+          # cargo-deb rewrites the `target/release/...` asset paths to the
+          # per-target dir automatically when `--target` is set.
+          cargo deb -p aterm --no-build --target ${{ matrix.target }}
+
+      - name: Rename for clarity
+        run: |
+          shopt -s nullglob
+          for f in target/${{ matrix.target }}/debian/*.deb; do
+            base=$(basename "$f" .deb)
+            mv "$f" "target/${{ matrix.target }}/debian/${base}_${{ matrix.arch }}.deb"
+          done
+          ls -la target/${{ matrix.target }}/debian/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aterm-${{ matrix.arch }}-deb
+          path: target/${{ matrix.target }}/debian/*.deb
+          if-no-files-found: error
+
+  # ── VS Code extension (.vsix) ───────────────────────────────────────────
+  build-vsix:
+    name: vsix · ${{ matrix.vsce }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            vsce: linux-x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            vsce: linux-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            vsce: darwin-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            vsce: darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            vsce: win32-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: vsix-${{ matrix.vsce }}
+
+      - name: Cross-compile toolchain (linux-arm64 only)
+        if: matrix.vsce == 'linux-arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: npm install
+        working-directory: vscode-extension
+        run: npm ci
+
+      - name: Build .vsix (POSIX)
+        if: runner.os != 'Windows'
+        working-directory: vscode-extension
+        run: bash scripts/build-vsix.sh ${{ matrix.vsce }}
+
+      - name: Build .vsix (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: vscode-extension
+        run: |
+          # The bash script works fine under git-bash on the Windows runner —
+          # it shells out to cargo + vsce which both run natively.
+          bash scripts/build-vsix.sh ${{ matrix.vsce }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-sessions-${{ matrix.vsce }}-vsix
+          path: vscode-extension/*.vsix
+          if-no-files-found: error
+
+  # ── GitHub Release ──────────────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: [build-deb, build-vsix]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artefacts
+        run: |
+          mkdir -p out
+          find artifacts -type f \( -name '*.deb' -o -name '*.vsix' \) \
+            -exec mv {} out/ \;
+          ls -la out/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
