@@ -126,28 +126,32 @@ son **Pro**:
 
 - **Comparativa paralela** (un agente por git worktree) + comparar/limpiar worktrees.
 - **Plantillas de lanzamiento** (guardar / lanzar / gestionar).
+- **Perfiles de espacio de trabajo**: guarda un conjunto de sesiones y reábrelas
+  todas de un clic (restaura el entorno de un proyecto en segundos).
+- **Dashboard Pro**: informe con filtros por rango de fecha, desglose por
+  proveedor / proyecto / modelo, **presupuestos por proyecto** y export a CSV.
+- **Exportar conversación a HTML** estilado (para compartir/archivar; PDF vía
+  imprimir).
+- **Automatizaciones**: aviso cuando una sesión lleva *idle* más de N minutos
+  (`pro.idleAlertMin`) y **resumen diario** de actividad/coste.
 
-Hay una **prueba de 14 días**; después, esas acciones piden activar una licencia
-(las demás siguen gratis). Activa con **«Agent Sessions: Activar licencia Pro…»**
-y consulta el estado con **«Estado de la licencia Pro»**.
+Hay una **prueba de 14 días**; un indicador en la barra de estado muestra
+«Pro / Prueba Nd / Activar Pro». Después de la prueba, esas acciones piden
+activar una licencia (las demás siguen gratis). Activa con **«Agent Sessions:
+Activar licencia Pro…»** y consulta el estado con **«Estado de la licencia Pro»**.
 
-### Emitir licencias (para el mantenedor)
+### Licencias (Lemon Squeezy)
 
-Las licencias se firman **offline** con Ed25519 (sin servidor). Una vez por
-proyecto:
+Las claves son **license keys de Lemon Squeezy**: el comprador las recibe
+automáticamente al pagar y la extensión las valida online contra la License API
+pública de Lemon Squeezy (no requiere API key ni servidor propio). La validación
+se cachea, así que el gate funciona offline tras la primera activación.
 
-```bash
-cd vscode-extension
-node scripts/sign-license.mjs keygen          # crea license-private.pem (¡backup!) y embebe la pública
-node scripts/sign-license.mjs sign cliente@correo.com        # licencia perpetua
-node scripts/sign-license.mjs sign cliente@correo.com 365    # caduca en 365 días
-node scripts/sign-license.mjs verify ATERM-PRO.…             # validar una clave
-```
+Hay dos planes (**anual** y **mensual**); al pulsar «Comprar Pro» se elige plan
+y se abre su checkout. Configura en `src/license.ts` antes de publicar:
 
-`license-private.pem` es el secreto de firma (gitignored): guárdalo a buen recaudo;
-si lo pierdes no podrás emitir más claves válidas contra la pública publicada.
-Cualquier checkout (Lemon Squeezy / Polar / Gumroad) puede emitir claves llamando
-a `sign` desde su webhook.
+- `BUY_URL_ANNUAL` / `BUY_URL_MONTHLY`: enlaces de checkout de Lemon Squeezy.
+- `PRODUCT_ID` (opcional): restringe las claves aceptadas a tu producto.
 
 ## Instalar
 
@@ -232,4 +236,5 @@ y modelo. Codex/OpenCode/Gemini se configuran de forma análoga si soportan MCP.
 | `agentSessions.notifyOnIdle`| `true`                  | Notificar cuando una sesión activa pasa de «trabajando» a «esperando input». |
 | `agentSessions.notifyOnFinish`| `true`                | Notificar cuando una sesión activa termina.                                  |
 | `agentSessions.claudeContextWindow`| `auto`           | Ventana de contexto de Claude para el cálculo del %: `auto`, `200k` o `1m`.  |
+| `agentSessions.pro.idleAlertMin`| `0`                 | (Pro) Avisar si una sesión lleva *idle* más de N minutos. `0` = desactivado. |
 | `agentSessions.costAlertDaily`| `0`                   | Umbral diario de gasto en USD; `0` desactiva la alerta.                      |

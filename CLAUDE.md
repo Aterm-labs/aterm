@@ -211,9 +211,10 @@ construye el sidecar para esa plataforma y lo empaqueta en el `.vsix` bajo
   **Pro**: comparativa paralela (`launchParallel`/`compareWorktrees`/
   `cleanupWorktrees`) y plantillas (`saveTemplate`/`runTemplate`/`manageTemplates`).
   Comandos `activateLicense`/`proStatus` (+ `debugPro` para QA, quitar antes del
-  release público). Emisión de claves con `scripts/sign-license.mjs`
-  (`keygen`/`sign`/`verify`); la privada `license-private.pem` es secreto
-  (gitignored). Pendiente: `BUY_URL` real.
+  release público). Validación de licencias vía **Lemon Squeezy License API**
+  (online, sin servidor propio ni secretos en el cliente: `activate`/`validate`
+  con la propia key) cacheada en `globalState` y tolerante a estar offline.
+  Pendiente: `BUY_URL`/`PRODUCT_ID` reales (constantes en `license.ts`).
 - ✅ **Split open-core (público Community ↔ privado Pro)**: el repo público es la
   **Community Edition**. El *source* de las features Pro (comparativa paralela y
   plantillas) ya **no vive en el público**: se movió al repo privado
@@ -225,6 +226,15 @@ construye el sidecar para esa plataforma y lo empaqueta en el `.vsix` bajo
   `build.sh` (compila público + Pro y empaqueta el `.vsix` oficial). Topología
   hermana `../aterm` por defecto (convertible a git submodule). El history MIT
   previo conserva esas features; el split protege el desarrollo futuro.
+  **Features Pro** (en `aterm-pro/pro/index.ts`): comparativa paralela,
+  plantillas, **perfiles de espacio de trabajo** (guardar/abrir conjuntos de
+  sesiones), **dashboard Pro** (informe + presupuestos por proyecto + export
+  CSV), **exportar conversación a HTML** y **automatizaciones** (watcher de
+  idle vía `ProModule.activate` + resumen diario). El contrato `ProApi`/
+  `ProModule` (`src/pro-api.d.ts`) creció con `sessions`/`resume`/`getState`/
+  `setState`/`addDisposable`. Refinamientos del gate: indicador en barra de
+  estado, revalidación periódica (12h), onboarding y comando `(debug)` oculto
+  salvo en `ExtensionMode.Development` (context key `agentSessions.dev`).
 - ⏳ **Fase 5 (render GPU)**: no hecha por diseño — opcional, solo si el throughput
   lo justifica (ver roadmap).
 - ⏳ **Pendientes menores**: import solo a Claude (el `.zip` es formato Claude);

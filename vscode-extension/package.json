@@ -181,6 +181,45 @@
         "icon": "$(group-by-ref-type)"
       },
       {
+        "command": "agentSessions.saveWorkspaceProfile",
+        "title": "Guardar perfil de espacio de trabajo… (Pro)",
+        "category": "Agent Sessions",
+        "icon": "$(save-all)"
+      },
+      {
+        "command": "agentSessions.openWorkspaceProfile",
+        "title": "Abrir perfil de espacio de trabajo… (Pro)",
+        "category": "Agent Sessions",
+        "icon": "$(window)"
+      },
+      {
+        "command": "agentSessions.manageWorkspaceProfiles",
+        "title": "Gestionar perfiles de espacio de trabajo… (Pro)",
+        "category": "Agent Sessions"
+      },
+      {
+        "command": "agentSessions.proReport",
+        "title": "Informe de actividad y costes… (Pro)",
+        "category": "Agent Sessions",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "agentSessions.setProjectBudget",
+        "title": "Presupuesto del proyecto… (Pro)",
+        "category": "Agent Sessions"
+      },
+      {
+        "command": "agentSessions.exportConversationHtml",
+        "title": "Exportar conversación a HTML… (Pro)",
+        "category": "Agent Sessions",
+        "icon": "$(file-pdf)"
+      },
+      {
+        "command": "agentSessions.dailySummary",
+        "title": "Resumen diario de actividad (Pro)",
+        "category": "Agent Sessions"
+      },
+      {
         "command": "agentSessions.projectCommands",
         "title": "Comandos del proyecto…",
         "category": "Agent Sessions",
@@ -260,6 +299,12 @@
       ]
     },
     "menus": {
+      "commandPalette": [
+        {
+          "command": "agentSessions.debugPro",
+          "when": "agentSessions.dev"
+        }
+      ],
       "view/title": [
         {
           "command": "agentSessions.newSession",
@@ -380,6 +425,13 @@
           },
           "default": [],
           "description": "Catálogo de etiquetas predefinidas. Aparecen como opciones marcables al asignar etiquetas a una sesión, para no tener que escribirlas a mano. Gestiónalo con el comando «Agent Sessions: Gestionar catálogo de etiquetas» o editando esta lista directamente."
+        },
+        "agentSessions.pro.idleAlertMin": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 240,
+          "description": "(Pro) Avisar cuando una sesión activa lleva esperando tu input (idle) más de N minutos. 0 = desactivado."
         },
         "agentSessions.claudeContextWindow": {
           "type": "string",

@@ -16,13 +16,31 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
-import { BUY_URL, LicenseService } from "./license";
+import { LicenseService, openBuy } from "./license";
 import type { ProApi, ProModule } from "./pro-api";
 
 let extensionPath = "";
 
 /** Pro licence gate (open-core). Set in activate(). */
 let license: LicenseService;
+
+/** First-run welcome: explains the panel + the 14-day Pro trial. Shown once. */
+function maybeOnboard(context: vscode.ExtensionContext): void {
+  if (context.globalState.get<boolean>("onboarded")) return;
+  void context.globalState.update("onboarded", true);
+  void vscode.window
+    .showInformationMessage(
+      "¡Bienvenido a Agent Sessions! Lista, previsualiza y reanuda tus sesiones de agentes. " +
+        "Incluye 14 días de prueba Pro (comparativa paralela y plantillas de lanzamiento).",
+      "Abrir panel",
+      "Ver Pro"
+    )
+    .then((pick) => {
+      if (pick === "Abrir panel")
+        void vscode.commands.executeCommand("agentSessions.focus");
+      else if (pick === "Ver Pro") void license.showStatus();
+    });
+}
 
 /** Load the optional compiled Pro module (`out/pro`). Present only in the
  *  official build from the private aterm-pro repo; absent in the Community
@@ -47,7 +65,7 @@ function requirePro(feature: string): boolean {
       "Comprar Pro"
     );
     if (pick === "Activar licencia") await license.activate();
-    else if (pick === "Comprar Pro") void vscode.env.openExternal(vscode.Uri.parse(BUY_URL));
+    else if (pick === "Comprar Pro") await openBuy();
   })();
   return false;
 }
@@ -3614,6 +3632,16 @@ export function activate(context: vscode.ExtensionContext): void {
   log("Agent Sessions activated.");
   license = new LicenseService(context);
   license.startTrialIfNeeded();
+  license.refreshStatusBar();
+  // Refresh against Lemon Squeezy, then warn if the trial is about to lapse.
+  void license.revalidate().then(() => license.maybeWarnTrialExpiring());
+  // Expose dev-only commands (the Pro debug helper) just in the dev host.
+  void vscode.commands.executeCommand(
+    "setContext",
+    "agentSessions.dev",
+    context.extensionMode === vscode.ExtensionMode.Development
+  );
+  maybeOnboard(context);
   const view = new SessionsView(context);
 
   // Open-core wiring: expose the helper surface to the optional Pro module and
@@ -3632,10 +3660,33 @@ export function activate(context: vscode.ExtensionContext): void {
     notifyError,
     pickLaunchCwd: (id) => pickLaunchCwd(view, id),
     parseTagInput,
+    sessions: () => view.sessionsSnapshot(),
+    projectAlias: (cwd) => view.projectAliasFor(cwd),
+    resume: async (p, id) => {
+      const s = view
+        .sessionsSnapshot()
+        .find((x) => x.provider === p && x.id === id);
+      if (s) await resumeSession(view, s, view.metadataFor(p, id));
+    },
+    getState: <T>(key: string) => context.globalState.get<T>(key),
+    setState: async (key, value) => {
+      await context.globalState.update(key, value);
+    },
+    addDisposable: (dispose) => context.subscriptions.push({ dispose }),
   };
   const proModule = loadProModule();
+  // Background setup for Pro automations (idle watcher, …), only when unlocked.
+  const proActivate = proModule?.activate;
+  if (proActivate && license.isPro()) {
+    try {
+      proActivate(proApi);
+    } catch (e) {
+      log(`pro.activate falló: ${(e as Error).message}`);
+    }
+  }
   const runPro =
-    (method: keyof ProModule, feature: string) => async (): Promise<void> => {
+    (method: Exclude<keyof ProModule, "activate">, feature: string) =>
+    async (): Promise<void> => {
       if (!requirePro(feature)) return;
       if (!proModule) {
         notifyInfo(
@@ -3705,6 +3756,34 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       "agentSessions.manageTemplates",
       runPro("manageTemplates", "Plantillas de lanzamiento")
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.saveWorkspaceProfile",
+      runPro("saveWorkspaceProfile", "Perfiles de espacio de trabajo")
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.openWorkspaceProfile",
+      runPro("openWorkspaceProfile", "Perfiles de espacio de trabajo")
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.manageWorkspaceProfiles",
+      runPro("manageWorkspaceProfiles", "Perfiles de espacio de trabajo")
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.proReport",
+      runPro("proReport", "Dashboard Pro")
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.setProjectBudget",
+      runPro("setProjectBudget", "Dashboard Pro")
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.exportConversationHtml",
+      runPro("exportConversationHtml", "Exportar conversación (HTML)")
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.dailySummary",
+      runPro("dailySummary", "Resumen diario")
     ),
     vscode.commands.registerCommand("agentSessions.manageTagCatalog", () =>
       manageTagCatalog(view)
