@@ -2,7 +2,7 @@
   "name": "agent-sessions",
   "displayName": "Agent Sessions",
   "description": "Lista, previsualiza y reanuda tus sesiones de agentes de código (Claude Code, Codex, OpenCode, Gemini) en el terminal integrado.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "Zarritas",
   "author": "Jesús Lorenzo",
   "license": "MIT",
@@ -59,6 +59,24 @@
         "icon": "$(sparkle)"
       },
       {
+        "command": "agentSessions.newSessionMulti",
+        "title": "Nueva sesión en varios proyectos…",
+        "category": "Agent Sessions",
+        "icon": "$(multiple-windows)"
+      },
+      {
+        "command": "agentSessions.deleteByDate",
+        "title": "Eliminar sesiones por fecha…",
+        "category": "Agent Sessions",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "agentSessions.addProjectToWorkspace",
+        "title": "Añadir proyecto al workspace…",
+        "category": "Agent Sessions",
+        "icon": "$(folder-opened)"
+      },
+      {
         "command": "agentSessions.setFilter",
         "title": "Filtrar sesiones…",
         "category": "Agent Sessions",
@@ -95,6 +113,11 @@
       {
         "command": "agentSessions.setProjectColor",
         "title": "Color del proyecto…",
+        "category": "Agent Sessions"
+      },
+      {
+        "command": "agentSessions.setProjectIcon",
+        "title": "Icono del proyecto…",
         "category": "Agent Sessions"
       },
       {
@@ -150,6 +173,24 @@
         "title": "Gestionar catálogo de etiquetas…",
         "category": "Agent Sessions",
         "icon": "$(tag)"
+      },
+      {
+        "command": "agentSessions.manageGroups",
+        "title": "Gestionar grupos…",
+        "category": "Agent Sessions",
+        "icon": "$(group-by-ref-type)"
+      },
+      {
+        "command": "agentSessions.projectCommands",
+        "title": "Comandos del proyecto…",
+        "category": "Agent Sessions",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "agentSessions.actionsMenu",
+        "title": "Todas las acciones…",
+        "category": "Agent Sessions",
+        "icon": "$(ellipsis)"
       },
       {
         "command": "agentSessions.quickActions",
@@ -237,10 +278,27 @@
           "default": true,
           "description": "Cerrar el terminal completo cuando la sesión del agente termina (ejecuta `exit` al acabar)."
         },
+        "agentSessions.notificationLevel": {
+          "type": "string",
+          "enum": [
+            "all",
+            "important",
+            "errors",
+            "none"
+          ],
+          "enumDescriptions": [
+            "Todas: avisos informativos, advertencias y errores.",
+            "Solo importantes: advertencias y errores (oculta los “info” de éxito y los avisos de estado en vivo).",
+            "Solo errores: oculta info y advertencias no interactivas.",
+            "Ninguna: silencia todas las notificaciones no interactivas (los diálogos de confirmación siguen apareciendo). Los errores silenciados se registran en el canal de salida “Agent Sessions”."
+          ],
+          "default": "all",
+          "description": "Qué notificaciones mostrar. Los diálogos que requieren tu respuesta (confirmar borrado, elegir agente…) no se ven afectados."
+        },
         "agentSessions.notifyOnIdle": {
           "type": "boolean",
           "default": true,
-          "description": "Notificar cuando una sesión activa pasa de “trabajando” a “esperando input”."
+          "description": "Notificar cuando una sesión activa pasa de “trabajando” a “esperando input”. Requiere que el nivel de notificaciones permita avisos informativos."
         },
         "agentSessions.notifyOnFinish": {
           "type": "boolean",
@@ -300,19 +358,36 @@
           "default": [],
           "description": "Catálogo de etiquetas predefinidas. Aparecen como opciones marcables al asignar etiquetas a una sesión, para no tener que escribirlas a mano. Gestiónalo con el comando «Agent Sessions: Gestionar catálogo de etiquetas» o editando esta lista directamente."
         },
+        "agentSessions.claudeContextWindow": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "200k",
+            "1m"
+          ],
+          "enumDescriptions": [
+            "Inferir: 200k salvo que el uso ya supere 200k (heurística del sidecar). Puede sobreestimar el % si usas la ventana de 1M con poco contexto.",
+            "Forzar ventana de 200k.",
+            "Forzar ventana de 1M (beta de contexto largo). Úsalo si tu cuenta tiene 1M para que el % no salga inflado."
+          ],
+          "default": "auto",
+          "description": "Tamaño de la ventana de contexto de Claude para calcular el porcentaje de contexto usado. Los logs de Claude no registran la ventana, así que el sidecar la infiere; este ajuste te deja fijarla."
+        },
         "agentSessions.groupBy": {
           "type": "string",
           "enum": [
             "provider",
             "project",
             "cascade",
-            "date"
+            "date",
+            "group"
           ],
           "enumDescriptions": [
             "Una rama por proveedor (Claude/Codex/…); plano dentro.",
-            "Una rama por proyecto (cwd); sesiones de cualquier proveedor dentro.",
+            "Una rama por proyecto (cwd); sesiones de cualquier proveedor dentro. Los subproyectos (cwd descendientes) se anidan bajo su proyecto ancestro.",
             "Proveedor → proyecto → sesión.",
-            "Por fecha: Hoy / Ayer / Esta semana / Este mes / Más antiguo."
+            "Por fecha: Hoy / Ayer / Esta semana / Este mes / Más antiguo.",
+            "Por grupo definido por ti (colecciones manuales). Crea y asigna grupos desde el menú de la sesión o «Gestionar grupos…»."
           ],
           "default": "provider",
           "description": "Cómo agrupar las sesiones en el panel."

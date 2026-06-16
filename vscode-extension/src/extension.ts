@@ -133,7 +133,14 @@ interface ProjectPatch {
   color?: string | null;
 }
 
-type GroupMode = "provider" | "project" | "cascade";
+type GroupMode = "provider" | "project" | "cascade" | "date" | "group";
+
+/** A user-defined session group (manual collection). */
+interface GroupDef {
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+}
 
 // ── Sidecar invocation ─────────────────────────────────────────────────────
 
@@ -529,7 +536,7 @@ class SessionsView implements vscode.WebviewViewProvider {
       this.projects = projects ?? { names: {}, colors: {} };
     } catch (e) {
       this.scan = { providers: [], sessions: [] };
-      vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+      notifyError(`Agent Sessions: ${(e as Error).message}`);
     } finally {
       this.refreshing = false;
     }
@@ -612,6 +619,10 @@ class SessionsView implements vscode.WebviewViewProvider {
         sessions,
         metadata: this.metadata,
         projects: this.projects,
+        sessionIcons: this.sessionIconMap(),
+        projectIcons: this.projectIconMap(),
+        groups: this.groupDefs(),
+        sessionGroups: this.sessionGroupMap(),
         quotas,
         serviceStatus,
         activeKeys: Array.from(this.activeTerminals.keys()),
@@ -619,8 +630,14 @@ class SessionsView implements vscode.WebviewViewProvider {
         filter: this.filter,
         home: os.homedir(),
         costAlertDaily: cfg.get<number>("costAlertDaily", 0) || 0,
+        claudeContextWindow: cfg.get<string>("claudeContextWindow", "auto"),
       },
     });
+  }
+
+  /** Tell the webview to leave multi-select mode (after a batch delete). */
+  exitSelection(): void {
+    this.view?.webview.postMessage({ type: "exitSelect" });
   }
 
   applyMetadata(provider: string, id: string, entry: SessionMetadata | null): void {
@@ -656,6 +673,76 @@ class SessionsView implements vscode.WebviewViewProvider {
 
   metadataFor(provider: string, id: string): SessionMetadata | null {
     return this.metadata[`${provider}:${id}`] ?? null;
+  }
+
+  // ── Per-session / per-project icons (emoji) ──────────────────────────────
+  // Stored in the extension's globalState rather than the shared metadata
+  // files, so adding icons here never risks the on-disk interop with the
+  // native app (which has no icon field).
+  sessionIconMap(): Record<string, string> {
+    return this.context.globalState.get<Record<string, string>>("sessionIcons", {}) || {};
+  }
+  projectIconMap(): Record<string, string> {
+    return this.context.globalState.get<Record<string, string>>("projectIcons", {}) || {};
+  }
+  async storeSessionIcon(provider: string, id: string, icon: string | null): Promise<void> {
+    const m = { ...this.sessionIconMap() };
+    const key = `${provider}:${id}`;
+    if (icon) m[key] = icon;
+    else delete m[key];
+    await this.context.globalState.update("sessionIcons", m);
+    this.push();
+  }
+  async storeProjectIcon(cwd: string, icon: string | null): Promise<void> {
+    const m = { ...this.projectIconMap() };
+    if (icon) m[cwd] = icon;
+    else delete m[cwd];
+    await this.context.globalState.update("projectIcons", m);
+    this.push();
+  }
+
+  // ── User-defined groups (collections of sessions) ────────────────────────
+  // Manual buckets the user creates to group arbitrary sessions, independent
+  // of provider/project. Stored in globalState (not the shared metadata) so
+  // they never affect on-disk interop. A session belongs to at most one group.
+  groupDefs(): Record<string, GroupDef> {
+    return this.context.globalState.get<Record<string, GroupDef>>("groups", {}) || {};
+  }
+  /** sessionKey (`provider:id`) → groupId. */
+  sessionGroupMap(): Record<string, string> {
+    return this.context.globalState.get<Record<string, string>>("sessionGroups", {}) || {};
+  }
+  async upsertGroup(id: string, def: GroupDef): Promise<void> {
+    const m = { ...this.groupDefs() };
+    m[id] = def;
+    await this.context.globalState.update("groups", m);
+    this.push();
+  }
+  async deleteGroup(id: string): Promise<void> {
+    const m = { ...this.groupDefs() };
+    delete m[id];
+    await this.context.globalState.update("groups", m);
+    // Drop assignments pointing at the removed group.
+    const a = { ...this.sessionGroupMap() };
+    let changed = false;
+    for (const [k, v] of Object.entries(a))
+      if (v === id) {
+        delete a[k];
+        changed = true;
+      }
+    if (changed) await this.context.globalState.update("sessionGroups", a);
+    this.push();
+  }
+  /** Assign (or, with `groupId === null`, unassign) a session to a group. */
+  async assignSessionGroup(
+    sessionKey: string,
+    groupId: string | null
+  ): Promise<void> {
+    const a = { ...this.sessionGroupMap() };
+    if (groupId) a[sessionKey] = groupId;
+    else delete a[sessionKey];
+    await this.context.globalState.update("sessionGroups", a);
+    this.push();
   }
   /** Distinct tags currently assigned across every session, sorted. */
   allUsedTags(): string[] {
@@ -738,7 +825,7 @@ class SessionsView implements vscode.WebviewViewProvider {
       }
       case "preview": {
         const s = this.findSession(msg.provider, msg.id);
-        if (s) await preview(s);
+        if (s) await preview(this, s);
         return;
       }
       case "contextMenu": {
@@ -755,6 +842,8 @@ class SessionsView implements vscode.WebviewViewProvider {
         return renameProject(this, { cwd: msg.cwd });
       case "setProjectColor":
         return setProjectColor(this, { cwd: msg.cwd });
+      case "setProjectIcon":
+        return editProjectIcon(this, msg.cwd);
       case "moveSession":
         return moveSessionToProject(this, msg.id, msg.sourceCwd, msg.destCwd);
       case "toggleFavorite": {
@@ -762,6 +851,24 @@ class SessionsView implements vscode.WebviewViewProvider {
         if (s) await toggleFavorite(this, s);
         return;
       }
+      case "openMany":
+        return openManySessions(this, Array.isArray(msg.items) ? msg.items : []);
+      case "deleteMany":
+        return deleteManySessions(this, Array.isArray(msg.items) ? msg.items : []);
+      case "assignGroup":
+        return assignToGroup(
+          this,
+          Array.isArray(msg.items) ? msg.items : [],
+          typeof msg.groupId === "string" ? msg.groupId : undefined
+        );
+      case "manageGroups":
+        return manageGroups(this);
+      case "addProjectToWorkspace":
+        return addProjectToWorkspace(String(msg.cwd || ""));
+      case "projectCommands":
+        return showProjectCommands(this, msg.cwd ? String(msg.cwd) : undefined);
+      case "actionsMenu":
+        return showActionsMenu();
       case "searchContent": {
         const q = String(msg.query || "").trim();
         if (!q || !this.view) return;
@@ -769,7 +876,7 @@ class SessionsView implements vscode.WebviewViewProvider {
         try {
           hits = (await runCli<ContentHit[]>(["search-content", q])) || [];
         } catch (e) {
-          vscode.window.showErrorMessage(
+          notifyError(
             `Agent Sessions: búsqueda falló (${(e as Error).message}).`
           );
           return;
@@ -832,13 +939,89 @@ function crypto(): string {
   return s;
 }
 
+// ── Notification gate ────────────────────────────────────────────────────
+// All fire-and-forget toasts route through notifyInfo/notifyWarn/notifyError
+// so the `notificationLevel` setting can dial them down. Interactive prompts
+// (a message with action items: confirmation modals, the smart-launch picker,
+// the live-status "Reanudar" toast) are NEVER suppressed — they carry a choice
+// the user needs to make — which we detect by the presence of extra arguments.
+
+type NotifyKind = "info" | "warn" | "error";
+
+function notificationLevel(): "all" | "important" | "errors" | "none" {
+  const raw = vscode.workspace
+    .getConfiguration("agentSessions")
+    .get<string>("notificationLevel", "all");
+  return raw === "important" || raw === "errors" || raw === "none" ? raw : "all";
+}
+
+/** Whether a non-interactive toast of `kind` should surface at the current
+ *  level. Interactive messages bypass this entirely (handled by the helpers). */
+function levelAllows(kind: NotifyKind): boolean {
+  switch (notificationLevel()) {
+    case "all":
+      return true;
+    case "important":
+      return kind !== "info";
+    case "errors":
+      return kind === "error";
+    case "none":
+      return false;
+  }
+}
+
+// Aliased so the bulk `vscode.window.show*Message(` → `notify*(` rewrite never
+// recurses into these helpers' own bodies.
+const win = vscode.window;
+
+function notifyInfo<T extends string>(
+  message: string,
+  ...items: T[]
+): Thenable<T | undefined> {
+  if (items.length > 0) return win.showInformationMessage(message, ...items);
+  if (!levelAllows("info")) return Promise.resolve(undefined);
+  return win.showInformationMessage(message);
+}
+
+function notifyWarn<T extends string>(
+  message: string,
+  ...rest: (T | vscode.MessageOptions)[]
+): Thenable<T | undefined> {
+  if (rest.length > 0) return win.showWarningMessage(message, ...(rest as any));
+  if (!levelAllows("warn")) return Promise.resolve(undefined);
+  return win.showWarningMessage(message);
+}
+
+function notifyError(message: string): void {
+  if (!levelAllows("error")) {
+    // Don't lose silenced errors entirely — leave a trace in the channel.
+    log(`(error silenciado por notificationLevel) ${message}`);
+    return;
+  }
+  void win.showErrorMessage(message);
+}
+
 /** Small toast for a live-state transition. Title carries the session
  *  display name (or a short id) so the user knows *which* session paged. */
+/** Recent `key|reason` → timestamp, to coalesce repeated live-state toasts
+ *  (e.g. an agent flapping busy↔idle) into one within a short window. */
+const recentNotifications = new Map<string, number>();
+
 function notifySession(
   view: SessionsView,
   l: LiveAgentSession,
   reason: string
 ): void {
+  // A live-state toast is informational; honour the global level too (the
+  // per-transition `notifyOnIdle`/`notifyOnFinish` toggles gate it as well).
+  if (!levelAllows("info")) return;
+  // De-dupe: skip if we paged the same session for the same reason recently.
+  const dedupeKey = `${l.provider}:${l.sessionId}|${reason}`;
+  const now = Date.now();
+  const last = recentNotifications.get(dedupeKey);
+  if (last !== undefined && now - last < 30_000) return;
+  recentNotifications.set(dedupeKey, now);
+
   const s = (view as any).scan.sessions.find(
     (x: Session) => x.provider === l.provider && x.id === l.sessionId
   ) as Session | undefined;
@@ -863,7 +1046,12 @@ function currentGroupMode(): GroupMode {
   const raw = vscode.workspace
     .getConfiguration("agentSessions")
     .get<string>("groupBy", "provider");
-  return raw === "project" || raw === "cascade" ? raw : "provider";
+  return raw === "project" ||
+    raw === "cascade" ||
+    raw === "date" ||
+    raw === "group"
+    ? raw
+    : "provider";
 }
 
 // ── Terminal launch ─────────────────────────────────────────────────────────
@@ -880,7 +1068,7 @@ function launch(
   argv: string[]
 ): vscode.Terminal | null {
   if (argv.length === 0) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: no hay comando para esta acción (¿binario del proveedor en PATH?)."
     );
     return null;
@@ -930,29 +1118,56 @@ const COMPACT_PROVIDERS = new Set(["claude"]);
 
 /** Run the provider's context-compaction argv in a one-off terminal. Unlike
  *  resume, this is NOT registered as an active terminal: it's a maintenance
- *  action that ends on its own, not a live conversation. */
-async function compactSession(view: SessionsView, s: Session): Promise<void> {
+ *  action that ends on its own, not a live conversation.
+ *
+ *  When `withPrompt` is set, the user is asked for focus instructions that get
+ *  appended to Claude's `/compact` slash command (`/compact <instructions>`),
+ *  so the summary keeps what matters to them. The sidecar argv stays generic
+ *  (`["claude","--resume",id,"-p","/compact"]`); we splice the instructions in
+ *  on the extension side so the shared Rust core needs no change. */
+async function compactSession(
+  view: SessionsView,
+  s: Session,
+  withPrompt = false
+): Promise<void> {
   // Compaction is itself a `--resume` over the same transcript; running it
   // while the session is live would put two processes on one file and corrupt
   // it — the same hazard resumeSession guards against.
   if (view.hasActiveTerminal(s.provider, s.id) || s.isActive) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: la sesión está activa. Ciérrala antes de compactar para no corromper el historial."
     );
     return;
+  }
+  let prompt: string | undefined;
+  if (withPrompt) {
+    const value = await vscode.window.showInputBox({
+      title: "Compactar con instrucciones",
+      prompt:
+        "Texto que enfoca el resumen (se añade a /compact). Vacío = compactación estándar.",
+      placeHolder: "p. ej. Conserva las decisiones de arquitectura y los TODO pendientes",
+    });
+    if (value === undefined) return; // cancelled (empty string = standard compaction)
+    prompt = value.trim() || undefined;
   }
   let argv: string[] | null;
   try {
     argv = await runCli<string[] | null>(["compact-argv", s.provider, s.id]);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   if (!argv || argv.length === 0) {
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: ${s.provider} no admite compactar el contexto fuera de la sesión.`
     );
     return;
+  }
+  if (prompt) {
+    // Append the instructions to the `/compact` token so the slash command
+    // becomes `/compact <instructions>`. Match the exact token rather than the
+    // last element to stay correct if the argv shape ever grows trailing flags.
+    argv = argv.map((a) => (a === "/compact" ? `/compact ${prompt}` : a));
   }
   const name = (
     view.metadataFor(s.provider, s.id)?.name?.trim() ||
@@ -973,19 +1188,225 @@ function conversationMarkdown(s: Session, turns: PreviewTurn[]): string {
   return `# ${s.title ?? s.id}\n\n${body}`;
 }
 
-async function preview(s: Session): Promise<void> {
+/** Provider accent colours for the preview header (mirror the webview's
+ *  PROVIDER_AVATAR, but as concrete VS Code theme tokens for the panel). */
+const PREVIEW_PROVIDER_COLOR: Record<string, string> = {
+  claude: "var(--vscode-charts-orange)",
+  codex: "var(--vscode-charts-green)",
+  opencode: "var(--vscode-charts-blue)",
+  gemini: "var(--vscode-charts-purple)",
+};
+const PREVIEW_PROVIDER_INITIAL: Record<string, string> = {
+  claude: "C",
+  codex: "X",
+  opencode: "O",
+  gemini: "G",
+};
+
+/** Context window to use for a session's % calculation. Claude's logs don't
+ *  record the window size, so the user can pin it (auto/200k/1m); other
+ *  providers report it directly. */
+function effectiveContextWindow(s: Session): number | null {
+  if (s.provider === "claude") {
+    const o = vscode.workspace
+      .getConfiguration("agentSessions")
+      .get<string>("claudeContextWindow", "auto");
+    if (o === "200k") return 200_000;
+    if (o === "1m") return 1_000_000;
+  }
+  return s.contextWindow;
+}
+
+/** A single reused preview panel. Opening another session's preview re-renders
+ *  this panel instead of stacking editor tabs. */
+let previewPanel: vscode.WebviewPanel | null = null;
+
+function escapeHtmlTs(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Tiny, dependency-free Markdown-ish renderer for a turn's text: fenced code
+ *  blocks become a code block, while inline code, bold and italic spans are
+ *  honoured and newlines are preserved. Everything is HTML-escaped first so
+ *  transcript content can't inject markup into the panel. */
+function renderTurnHtml(text: string): string {
+  const parts = (text || "").split(/```/);
+  let out = "";
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) {
+      // Inside a fenced block. Drop an optional language hint on the first line.
+      const body = parts[i].replace(/^[^\n]*\n/, (m) =>
+        /^[a-zA-Z0-9_+-]*\n$/.test(m) ? "" : m
+      );
+      out += `<pre class="code"><code>${escapeHtmlTs(body)}</code></pre>`;
+    } else {
+      let seg = escapeHtmlTs(parts[i]);
+      seg = seg.replace(/`([^`]+)`/g, "<code>$1</code>");
+      seg = seg.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      seg = seg.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+      seg = seg.replace(/\n/g, "<br>");
+      out += seg;
+    }
+  }
+  return out;
+}
+
+function renderPreviewHtml(
+  webview: vscode.Webview,
+  s: Session,
+  turns: PreviewTurn[],
+  meta: SessionMetadata | null
+): string {
+  const accent = PREVIEW_PROVIDER_COLOR[s.provider] || "var(--vscode-charts-foreground)";
+  const initial = PREVIEW_PROVIDER_INITIAL[s.provider] || s.provider[0].toUpperCase();
+  const title = meta?.name?.trim() || s.title?.trim() || s.id;
+
+  const chips: string[] = [];
+  const chip = (label: string) => `<span class="chip">${escapeHtmlTs(label)}</span>`;
+  chips.push(chip(s.provider));
+  if (s.model) chips.push(chip(s.model.split("/").pop() as string));
+  if (s.branch) chips.push(chip(`⎇ ${s.branch}`));
+  if (s.cwd) chips.push(chip(displayPath(s.cwd)));
+  const win = effectiveContextWindow(s);
+  if (s.contextTokens && win) {
+    const pct = Math.round((s.contextTokens / win) * 100);
+    chips.push(chip(`ctx ${pct}%`));
+  }
+  if (s.costUsd) chips.push(chip(`$${s.costUsd.toFixed(2)}`));
+  if (meta?.tags?.length) for (const t of meta.tags) chips.push(chip(`#${t}`));
+  chips.push(chip(new Date(s.lastActivity * 1000).toLocaleString()));
+
+  const body = turns.length
+    ? turns
+        .map((t) => {
+          const isUser = t.role === "user";
+          const who = isUser ? "🧑 Usuario" : "🤖 Asistente";
+          return `<article class="turn ${isUser ? "user" : "assistant"}">
+            <header class="turn-role">${who}</header>
+            <div class="turn-body">${renderTurnHtml(t.text)}</div>
+          </article>`;
+        })
+        .join("\n")
+    : `<p class="empty">(sin contenido)</p>`;
+
+  // 'unsafe-inline' for style-src (no nonce) so the workbench's injected
+  // <style> with the --vscode-* theme variables isn't blocked — a nonce-source
+  // in the directive would make the browser ignore unsafe-inline and strip the
+  // theme, the same caveat the main panel documents.
+  const csp = [
+    `default-src 'none'`,
+    `style-src ${webview.cspSource} 'unsafe-inline'`,
+    `img-src ${webview.cspSource} data:`,
+  ].join("; ");
+
+  return `<!doctype html>
+<html lang="es"><head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="${csp}" />
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 0;
+    font-family: var(--vscode-font-family, system-ui, sans-serif);
+    font-size: var(--vscode-font-size, 13px);
+    color: var(--vscode-foreground); background: var(--vscode-editor-background);
+  }
+  .head {
+    position: sticky; top: 0; z-index: 1;
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 20px; border-bottom: 1px solid var(--vscode-panel-border, #0003);
+    background: var(--vscode-editor-background);
+  }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 15px; color: var(--vscode-editor-background);
+    background: ${accent};
+  }
+  .head-text { min-width: 0; }
+  .head h1 { margin: 0; font-size: 1.15em; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip {
+    font-size: 0.82em; padding: 1px 8px; border-radius: 10px;
+    background: var(--vscode-badge-background, #3334); color: var(--vscode-badge-foreground, inherit);
+  }
+  main { max-width: 900px; margin: 0 auto; padding: 16px 20px 64px; }
+  .turn {
+    margin: 0 0 14px; padding: 10px 14px; border-radius: 10px;
+    border: 1px solid var(--vscode-panel-border, #0002);
+  }
+  .turn.user {
+    background: color-mix(in srgb, ${accent} 8%, transparent);
+    border-color: color-mix(in srgb, ${accent} 35%, transparent);
+  }
+  .turn.assistant { background: var(--vscode-textBlockQuote-background, #8881); }
+  .turn-role {
+    font-weight: 600; font-size: 0.85em; opacity: 0.8; margin-bottom: 6px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .turn-body { line-height: 1.5; word-wrap: break-word; overflow-wrap: anywhere; }
+  .turn-body code {
+    font-family: var(--vscode-editor-font-family, monospace);
+    background: var(--vscode-textCodeBlock-background, #8882); padding: 1px 4px; border-radius: 3px;
+  }
+  pre.code {
+    background: var(--vscode-textCodeBlock-background, #1115); border-radius: 6px;
+    padding: 10px 12px; overflow-x: auto;
+  }
+  pre.code code { background: none; padding: 0; }
+  .empty { opacity: 0.6; font-style: italic; }
+</style>
+</head><body>
+  <div class="head">
+    <span class="avatar">${escapeHtmlTs(initial)}</span>
+    <div class="head-text">
+      <h1>${escapeHtmlTs(title)}</h1>
+      <div class="chips">${chips.join("")}</div>
+    </div>
+  </div>
+  <main>${body}</main>
+</body></html>`;
+}
+
+/** Render a session's conversation in a styled, reusable webview panel. */
+async function preview(view: SessionsView, s: Session): Promise<void> {
+  let turns: PreviewTurn[];
   try {
-    const turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
-    const doc = await vscode.workspace.openTextDocument({
-      content: conversationMarkdown(s, turns),
-      language: "markdown",
-    });
-    await vscode.window.showTextDocument(doc, { preview: true });
+    turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: previsualización no disponible (${(e as Error).message}).`
     );
+    return;
   }
+  const meta = view.metadataFor(s.provider, s.id);
+  const title = `Vista previa — ${(meta?.name?.trim() || s.title?.trim() || s.id).slice(0, 40)}`;
+
+  if (!previewPanel) {
+    previewPanel = vscode.window.createWebviewPanel(
+      "agentSessions.preview",
+      title,
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+      { enableScripts: false, retainContextWhenHidden: true }
+    );
+    previewPanel.onDidDispose(() => {
+      previewPanel = null;
+    });
+  } else {
+    previewPanel.reveal(undefined, false);
+  }
+  previewPanel.title = title;
+  previewPanel.webview.html = renderPreviewHtml(
+    previewPanel.webview,
+    s,
+    turns,
+    meta
+  );
 }
 
 /** Copy the whole conversation to the clipboard as Markdown. */
@@ -993,17 +1414,17 @@ async function copyConversation(s: Session): Promise<void> {
   try {
     const turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
     if (turns.length === 0) {
-      vscode.window.showInformationMessage(
+      notifyInfo(
         "Agent Sessions: conversación vacía, nada que copiar."
       );
       return;
     }
     await vscode.env.clipboard.writeText(conversationMarkdown(s, turns));
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: conversación copiada (${turns.length} turnos).`
     );
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo copiar (${(e as Error).message}).`
     );
   }
@@ -1015,13 +1436,13 @@ async function saveConversation(s: Session): Promise<void> {
   try {
     turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo leer la conversación (${(e as Error).message}).`
     );
     return;
   }
   if (turns.length === 0) {
-    vscode.window.showInformationMessage(
+    notifyInfo(
       "Agent Sessions: conversación vacía, nada que guardar."
     );
     return;
@@ -1035,11 +1456,11 @@ async function saveConversation(s: Session): Promise<void> {
   if (!target) return;
   try {
     await fs.promises.writeFile(target.fsPath, conversationMarkdown(s, turns), "utf8");
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: guardada en ${path.basename(target.fsPath)}.`
     );
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo guardar (${(e as Error).message}).`
     );
   }
@@ -1065,7 +1486,7 @@ function exec(file: string, args: string[], cwd?: string): Promise<string> {
 async function launchParallel(): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: abre una carpeta antes de lanzar una comparativa."
     );
     return;
@@ -1074,7 +1495,7 @@ async function launchParallel(): Promise<void> {
   try {
     await exec("git", ["rev-parse", "--show-toplevel"], repoRoot);
   } catch {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: la carpeta abierta no es un repo git (necesario para worktrees)."
     );
     return;
@@ -1084,12 +1505,12 @@ async function launchParallel(): Promise<void> {
   try {
     providers = await runCli<ProviderInfo[]>(["providers"]);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const usable = providers.filter((p) => p.binaryFound);
   if (usable.length < 2) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: necesitas al menos 2 agentes en PATH para una comparativa."
     );
     return;
@@ -1130,7 +1551,7 @@ async function launchParallel(): Promise<void> {
         repoRoot
       );
     } catch (e) {
-      vscode.window.showWarningMessage(
+      notifyWarn(
         `Agent Sessions: no se pudo crear worktree para ${pick.info.displayName} (${(e as Error).message}).`
       );
       continue;
@@ -1152,7 +1573,7 @@ async function launchParallel(): Promise<void> {
   }
 
   if (launched.length === 0) return;
-  vscode.window.showInformationMessage(
+  notifyInfo(
     `Agent Sessions: lanzados ${launched.length} agentes en worktrees bajo ${parent}. ` +
       `Branches: ${launched.join(", ")}. Para limpiar: "Limpiar worktrees…" en la paleta.`
   );
@@ -1165,7 +1586,7 @@ async function launchParallel(): Promise<void> {
 async function compareWorktrees(): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: abre primero la carpeta del repo."
     );
     return;
@@ -1175,7 +1596,7 @@ async function compareWorktrees(): Promise<void> {
   try {
     raw = await exec("git", ["worktree", "list", "--porcelain"], repoRoot);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const trees: { path: string; branch: string }[] = [];
@@ -1192,7 +1613,7 @@ async function compareWorktrees(): Promise<void> {
     }
   }
   if (trees.length === 0) {
-    vscode.window.showInformationMessage(
+    notifyInfo(
       "Agent Sessions: no hay worktrees de comparativa para comparar."
     );
     return;
@@ -1255,7 +1676,7 @@ async function compareWorktrees(): Promise<void> {
 async function cleanupWorktrees(): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: abre primero la carpeta del repo."
     );
     return;
@@ -1265,7 +1686,7 @@ async function cleanupWorktrees(): Promise<void> {
   try {
     raw = await exec("git", ["worktree", "list", "--porcelain"], repoRoot);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const trees: { path: string; branch: string }[] = [];
@@ -1282,7 +1703,7 @@ async function cleanupWorktrees(): Promise<void> {
     }
   }
   if (trees.length === 0) {
-    vscode.window.showInformationMessage(
+    notifyInfo(
       "Agent Sessions: no hay worktrees de comparativa que limpiar."
     );
     return;
@@ -1304,12 +1725,12 @@ async function cleanupWorktrees(): Promise<void> {
       await exec("git", ["worktree", "remove", "--force", p.tree.path], repoRoot);
       await exec("git", ["branch", "-D", p.tree.branch], repoRoot);
     } catch (e) {
-      vscode.window.showWarningMessage(
+      notifyWarn(
         `Agent Sessions: no se pudo eliminar ${p.tree.branch} (${(e as Error).message}).`
       );
     }
   }
-  vscode.window.showInformationMessage(
+  notifyInfo(
     `Agent Sessions: limpiados ${picks.length} worktree(s).`
   );
 }
@@ -1323,12 +1744,12 @@ async function smartLaunch(view: SessionsView): Promise<void> {
   try {
     providers = await runCli<ProviderInfo[]>(["providers"]);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const usable = providers.filter((p) => p.binaryFound);
   if (usable.length === 0) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: ningún binario de agente encontrado en PATH."
     );
     return;
@@ -1354,7 +1775,7 @@ async function smartLaunch(view: SessionsView): Promise<void> {
     .sort((a, b) => b.score - a.score);
   const top = ranked[0];
 
-  const action = await vscode.window.showInformationMessage(
+  const action = await notifyInfo(
     cwd
       ? `Agente sugerido para ${path.basename(cwd)}: ${top.p.displayName}.`
       : `Agente sugerido: ${top.p.displayName}.`,
@@ -1392,12 +1813,12 @@ async function newSession(
   try {
     providers = await runCli<ProviderInfo[]>(["providers"]);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const usable = providers.filter((p) => p.binaryFound);
   if (usable.length === 0) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: ningún binario de agente encontrado en PATH."
     );
     return;
@@ -1415,6 +1836,98 @@ async function newSession(
     presetCwd !== undefined ? presetCwd : await pickLaunchCwd(view, pick.info.id);
   if (cwd === undefined) return; // cancelled
   launch(`✦ ${pick.info.displayName}`, cwd ?? undefined, pick.info.newSessionArgv);
+}
+
+/** Launch a fresh session of one provider across several directories at once.
+ *  Pick the provider, then tick the project folders (known cwds + the open
+ *  workspace); each ticked folder gets its own terminal. Saves setting up the
+ *  same agent in N projects one by one. */
+async function newSessionMulti(view: SessionsView): Promise<void> {
+  let providers: ProviderInfo[];
+  try {
+    providers = await runCli<ProviderInfo[]>(["providers"]);
+  } catch (e) {
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
+    return;
+  }
+  const usable = providers.filter((p) => p.binaryFound);
+  if (usable.length === 0) {
+    notifyWarn("Agent Sessions: ningún binario de agente encontrado en PATH.");
+    return;
+  }
+  const provPick = await vscode.window.showQuickPick(
+    usable.map((p) => ({ label: p.displayName, info: p })),
+    { placeHolder: "Proveedor para las nuevas sesiones" }
+  );
+  if (!provPick) return;
+
+  // Candidate directories: the open workspace folder(s) + every cwd we've seen.
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  for (const f of vscode.workspace.workspaceFolders ?? []) {
+    if (!seen.has(f.uri.fsPath)) {
+      seen.add(f.uri.fsPath);
+      dirs.push(f.uri.fsPath);
+    }
+  }
+  for (const s of [...view.sessionsSnapshot()].sort(
+    (a, b) => b.lastActivity - a.lastActivity
+  )) {
+    if (!s.cwd || seen.has(s.cwd)) continue;
+    seen.add(s.cwd);
+    dirs.push(s.cwd);
+  }
+  if (dirs.length === 0) {
+    notifyWarn(
+      "Agent Sessions: no hay proyectos conocidos para lanzar en lote. Usa “Nueva sesión” y elige una carpeta."
+    );
+    return;
+  }
+  const picks = await vscode.window.showQuickPick(
+    dirs.map((c) => ({
+      label: view.projectAliasFor(c) || path.basename(c) || c,
+      description: displayPath(c),
+      cwd: c,
+    })),
+    {
+      canPickMany: true,
+      matchOnDescription: true,
+      placeHolder: `Carpetas donde abrir ${provPick.info.displayName} (espacio para marcar)`,
+    }
+  );
+  if (!picks || picks.length === 0) return;
+  for (const p of picks) {
+    launch(`✦ ${provPick.info.displayName}`, p.cwd, provPick.info.newSessionArgv);
+  }
+  notifyInfo(
+    `Agent Sessions: lanzadas ${picks.length} sesión(es) de ${provPick.info.displayName}.`
+  );
+}
+
+/** Add a project's directory to the current VS Code workspace (multi-root). */
+function addProjectToWorkspace(cwd: string): void {
+  if (!cwd || cwd === "(sin proyecto)") return;
+  const already = (vscode.workspace.workspaceFolders ?? []).some(
+    (f) => f.uri.fsPath === cwd
+  );
+  if (already) {
+    notifyInfo(
+      `Agent Sessions: ${path.basename(cwd) || cwd} ya está en el workspace.`
+    );
+    return;
+  }
+  const start = vscode.workspace.workspaceFolders?.length ?? 0;
+  const ok = vscode.workspace.updateWorkspaceFolders(start, 0, {
+    uri: vscode.Uri.file(cwd),
+  });
+  if (ok)
+    notifyInfo(
+      `Agent Sessions: añadida ${path.basename(cwd) || cwd} al workspace.`
+    );
+  else
+    notifyError(
+      `Agent Sessions: no se pudo añadir ${displayPath(cwd)} al workspace.`
+    );
 }
 
 /** Pick where a new session should start: the open workspace, the provider's
@@ -1539,12 +2052,19 @@ async function sessionContextMenu(view: SessionsView, s: Session): Promise<void>
     { label: "$(note) Notas…", action: "notes" },
     { label: "$(tag) Etiquetas…", action: "tags" },
     { label: "$(symbol-color) Color…", action: "color" },
+    { label: "$(star-empty) Icono…", action: "icon" },
+    { label: "$(group-by-ref-type) Mover a grupo…", action: "group" },
     { label: "$(cloud-download) Exportar a .zip…", action: "export" },
     { label: "$(copy) Copiar conversación (Markdown)", action: "copyMd" },
     { label: "$(save) Guardar conversación (.md)…", action: "saveMd" },
   ];
-  if (COMPACT_PROVIDERS.has(s.provider))
+  if (COMPACT_PROVIDERS.has(s.provider)) {
     items.push({ label: "$(fold) Compactar contexto", action: "compact" });
+    items.push({
+      label: "$(fold) Compactar con instrucciones…",
+      action: "compactPrompt",
+    });
+  }
   if (meta) items.push({ label: "Limpiar metadata", action: "clear" });
   items.push({ label: "$(trash) Eliminar sesión…", action: "delete" });
   const pick = await vscode.window.showQuickPick(items, {
@@ -1555,13 +2075,17 @@ async function sessionContextMenu(view: SessionsView, s: Session): Promise<void>
     case "resume":
       return resumeSession(view, s, meta);
     case "preview":
-      return preview(s);
+      return preview(view, s);
     case "rename":
       return renameSession(view, s);
     case "tags":
       return editTags(view, s);
     case "color":
       return setSessionColor(view, s);
+    case "icon":
+      return editSessionIcon(view, s);
+    case "group":
+      return assignToGroup(view, [{ provider: s.provider, id: s.id }]);
     case "export":
       return exportSession(s);
     case "notes":
@@ -1578,6 +2102,8 @@ async function sessionContextMenu(view: SessionsView, s: Session): Promise<void>
       return continueAsOtherAgent(view, s);
     case "compact":
       return compactSession(view, s);
+    case "compactPrompt":
+      return compactSession(view, s, true);
     case "copyMd":
       return copyConversation(s);
     case "saveMd":
@@ -1637,14 +2163,14 @@ async function continueAsOtherAgent(view: SessionsView, s: Session): Promise<voi
   try {
     providers = await runCli<ProviderInfo[]>(["providers"]);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const targets = providers.filter(
     (p) => p.binaryFound && p.id !== s.provider
   );
   if (targets.length === 0) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: no hay otros agentes disponibles en PATH."
     );
     return;
@@ -1659,13 +2185,13 @@ async function continueAsOtherAgent(view: SessionsView, s: Session): Promise<voi
   try {
     turns = (await runCli<PreviewTurn[]>(["preview", s.provider, s.id])) || [];
   } catch (e) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       `Agent Sessions: no se pudo leer el historial (${(e as Error).message}).`
     );
     return;
   }
   if (turns.length === 0) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: la sesión no tiene contenido legible para migrar."
     );
     return;
@@ -1682,7 +2208,7 @@ async function continueAsOtherAgent(view: SessionsView, s: Session): Promise<voi
   );
   if (!terminal) return;
   setTimeout(() => terminal.sendText(handoff, false), 2500);
-  vscode.window.showInformationMessage(
+  notifyInfo(
     `Agent Sessions: handoff de ${s.provider} → ${pick.info.id} preparado en el terminal (pulsa Enter para enviarlo).`
   );
 }
@@ -1757,23 +2283,23 @@ async function toggleArchived(view: SessionsView, s: Session): Promise<void> {
   try {
     if (persisted) {
       await runCli(["unarchive", s.provider, s.id]);
-      vscode.window.showInformationMessage(
+      notifyInfo(
         "Agent Sessions: la sesión ya no se persiste (copia eliminada)."
       );
     } else {
       const r = await runCli<{ written: number }>(["archive", s.provider, s.id]);
       if (!r || r.written === 0) {
-        vscode.window.showWarningMessage(
+        notifyWarn(
           "Agent Sessions: nada que persistir (sesión no localizada en disco)."
         );
         return;
       }
-      vscode.window.showInformationMessage(
+      notifyInfo(
         "Agent Sessions: sesión persistida — copia durable creada bajo ~/.config/aterm/archive."
       );
     }
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   await view.refresh();
@@ -1789,7 +2315,7 @@ async function resumeArchived(
   title: string | null
 ): Promise<void> {
   if (provider !== "claude") {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: restaurar y reanudar una sesión archivada solo está soportado para Claude por ahora."
     );
     return;
@@ -1797,7 +2323,7 @@ async function resumeArchived(
   try {
     await runCli(["archive-restore", provider, id]);
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo restaurar (${(e as Error).message}).`
     );
     return;
@@ -1812,7 +2338,7 @@ async function resumeArchived(
   try {
     argv = (await runCli<string[]>(["resume-argv", provider, id])) || [];
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const terminal = launch(`▶ ${(title || id).slice(0, 30)}`, cwd, argv);
@@ -1825,7 +2351,7 @@ async function resumeArchived(
  *  running). The native panel does the same dance. */
 async function deleteSession(view: SessionsView, s: Session): Promise<void> {
   const label = (view.metadataFor(s.provider, s.id)?.name || s.title || s.id).slice(0, 60);
-  const confirm = await vscode.window.showWarningMessage(
+  const confirm = await notifyWarn(
     `¿Eliminar "${label}"? Esta acción no se puede deshacer.`,
     { modal: true },
     "Eliminar"
@@ -1837,7 +2363,7 @@ async function deleteSession(view: SessionsView, s: Session): Promise<void> {
   } catch (e) {
     const msg = (e as Error).message;
     if (msg.trim() === "ACTIVE") {
-      const force = await vscode.window.showWarningMessage(
+      const force = await notifyWarn(
         `La sesión está activa. ¿Forzar el borrado?`,
         { modal: true },
         "Forzar borrado"
@@ -1847,14 +2373,124 @@ async function deleteSession(view: SessionsView, s: Session): Promise<void> {
         await runCli(["delete", s.provider, s.id, "--force"]);
         afterDelete(view, s);
       } catch (e2) {
-        vscode.window.showErrorMessage(
+        notifyError(
           `Agent Sessions: no se pudo borrar (${(e2 as Error).message}).`
         );
       }
     } else {
-      vscode.window.showErrorMessage(`Agent Sessions: ${msg}.`);
+      notifyError(`Agent Sessions: ${msg}.`);
     }
   }
+}
+
+interface SessionRef {
+  provider: string;
+  id: string;
+}
+
+/** Resume several sessions at once (multi-select "Abrir"). Each goes to its own
+ *  terminal; resumeSession already focuses an existing one instead of
+ *  double-resuming. */
+async function openManySessions(
+  view: SessionsView,
+  items: SessionRef[]
+): Promise<void> {
+  const all = view.sessionsSnapshot();
+  let opened = 0;
+  for (const it of items) {
+    const s = all.find((x) => x.provider === it.provider && x.id === it.id);
+    if (!s || s.resumeArgv.length === 0) continue;
+    await resumeSession(view, s, view.metadataFor(s.provider, s.id));
+    opened++;
+  }
+  if (opened > 0)
+    notifyInfo(`Agent Sessions: abiertas ${opened} sesión(es).`);
+}
+
+/** Delete several sessions at once with a single confirmation. Active sessions
+ *  are skipped (not force-deleted in bulk — too easy to corrupt a live one);
+ *  the summary reports how many were skipped. */
+async function deleteManySessions(
+  view: SessionsView,
+  items: SessionRef[]
+): Promise<void> {
+  if (items.length === 0) return;
+  const confirm = await notifyWarn(
+    `¿Eliminar ${items.length} sesión(es)? Esta acción no se puede deshacer.`,
+    { modal: true } as vscode.MessageOptions,
+    `Eliminar ${items.length}`
+  );
+  if (confirm !== `Eliminar ${items.length}`) return;
+
+  const all = view.sessionsSnapshot();
+  let deleted = 0;
+  let active = 0;
+  let failed = 0;
+  for (const it of items) {
+    const s = all.find((x) => x.provider === it.provider && x.id === it.id);
+    if (!s) continue;
+    try {
+      await runCli(["delete", it.provider, it.id]);
+      afterDelete(view, s);
+      deleted++;
+    } catch (e) {
+      const msg = (e as Error).message.trim();
+      if (msg === "ACTIVE") active++;
+      else failed++;
+    }
+  }
+  const parts = [`borradas ${deleted}`];
+  if (active) parts.push(`${active} activa(s) omitida(s)`);
+  if (failed) parts.push(`${failed} con error`);
+  notifyInfo(`Agent Sessions: ${parts.join(", ")}.`);
+  view.exitSelection();
+  await view.refresh();
+}
+
+/** Bulk-delete by age of last activity. Picks a threshold, previews the count
+ *  and routes through deleteManySessions (which confirms). Active and
+ *  archived-only sessions are excluded. */
+async function deleteByDate(view: SessionsView): Promise<void> {
+  let sessions = view.sessionsSnapshot();
+  if (sessions.length === 0) {
+    await view.refresh();
+    sessions = view.sessionsSnapshot();
+  }
+  if (sessions.length === 0) {
+    notifyInfo("Agent Sessions: no hay sesiones.");
+    return;
+  }
+  const options = [
+    { label: "Más antiguas que 7 días", days: 7 },
+    { label: "Más antiguas que 30 días", days: 30 },
+    { label: "Más antiguas que 90 días", days: 90 },
+    { label: "Más antiguas que 180 días", days: 180 },
+  ];
+  const pick = await vscode.window.showQuickPick(
+    options.map((o) => {
+      const cutoff = Date.now() / 1000 - o.days * 86400;
+      const n = sessions.filter(
+        (s) => !s.archivedOnly && !s.isActive && s.lastActivity < cutoff
+      ).length;
+      return { label: o.label, description: `${n} sesión(es)`, days: o.days };
+    }),
+    { placeHolder: "Eliminar sesiones por antigüedad de la última actividad" }
+  );
+  if (!pick) return;
+  const cutoff = Date.now() / 1000 - pick.days * 86400;
+  const targets = sessions.filter(
+    (s) => !s.archivedOnly && !s.isActive && s.lastActivity < cutoff
+  );
+  if (targets.length === 0) {
+    notifyInfo(
+      `Agent Sessions: no hay sesiones inactivas más antiguas que ${pick.days} días.`
+    );
+    return;
+  }
+  await deleteManySessions(
+    view,
+    targets.map((s) => ({ provider: s.provider, id: s.id }))
+  );
 }
 
 /** Local cleanup after a successful delete: drop the session from the cached
@@ -2018,7 +2654,7 @@ async function manageTagCatalog(view: SessionsView): Promise<void> {
     if (fresh) next = dedupeTags([...next, ...parseTagInput(fresh)]);
   }
   await setTagCatalog(next);
-  vscode.window.showInformationMessage(
+  notifyInfo(
     `Catálogo de etiquetas: ${next.length} etiqueta(s).`
   );
 }
@@ -2034,12 +2670,244 @@ async function setSessionColor(view: SessionsView, s: Session): Promise<void> {
   });
 }
 
+/** A small palette of emoji presets for the icon picker. The user can always
+ *  type any other emoji/short text via "Otro…". */
+const ICON_CHOICES = [
+  "⭐", "🔥", "🚀", "🐛", "🧪", "🔧", "📦", "📝",
+  "💡", "🎯", "⚠️", "✅", "🌿", "🔒", "🎨", "🗂️",
+  "🤖", "🧠", "📊", "🛠️",
+];
+
+/** Shared emoji picker. Returns a string to set, `null` to clear, or
+ *  `undefined` when cancelled. */
+async function pickIcon(current: string | undefined): Promise<string | null | undefined> {
+  type Item = vscode.QuickPickItem & { action: "none" | "other" | "set"; value?: string };
+  const items: Item[] = [
+    { label: "$(circle-slash) Sin icono", action: "none" },
+    { label: "$(pencil) Otro emoji o texto…", action: "other" },
+    { label: "", kind: vscode.QuickPickItemKind.Separator, action: "set" },
+    ...ICON_CHOICES.map(
+      (e): Item => ({
+        label: e,
+        description: e === current ? "actual" : undefined,
+        action: "set",
+        value: e,
+      })
+    ),
+  ];
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Elige un icono (emoji)",
+  });
+  if (!pick) return undefined;
+  if (pick.action === "none") return null;
+  if (pick.action === "other") {
+    const v = await vscode.window.showInputBox({
+      title: "Icono personalizado",
+      prompt: "Un emoji o texto corto (vacío = sin icono)",
+      value: current ?? "",
+    });
+    if (v === undefined) return undefined;
+    return v.trim() || null;
+  }
+  return pick.value ?? null;
+}
+
+async function editSessionIcon(view: SessionsView, s: Session): Promise<void> {
+  const current = view.sessionIconMap()[`${s.provider}:${s.id}`];
+  const result = await pickIcon(current);
+  if (result === undefined) return;
+  await view.storeSessionIcon(s.provider, s.id, result);
+}
+
+async function editProjectIcon(view: SessionsView, cwd?: string): Promise<void> {
+  const c = await pickProjectCwd(view, cwd);
+  if (!c) return;
+  const current = view.projectIconMap()[c];
+  const result = await pickIcon(current);
+  if (result === undefined) return;
+  await view.storeProjectIcon(c, result);
+}
+
+// ── User-defined groups ──────────────────────────────────────────────────
+
+/** Emoji/colour-less quick color picker shared by sessions/projects/groups. */
+async function pickColor(): Promise<string | null | undefined> {
+  const pick = await vscode.window.showQuickPick(
+    COLOR_PALETTE.map((c) => ({ label: c.label, hex: c.hex })),
+    { placeHolder: "Color (opcional)" }
+  );
+  if (!pick) return undefined;
+  return pick.hex;
+}
+
+/** Create a new group (name + optional colour). Returns the new group id, or
+ *  undefined if cancelled. */
+async function createGroup(view: SessionsView): Promise<string | undefined> {
+  const name = await vscode.window.showInputBox({
+    title: "Nuevo grupo",
+    prompt: "Nombre del grupo para agrupar sesiones",
+    placeHolder: "p. ej. Sprint actual, Clientes, Experimentos…",
+  });
+  if (!name || !name.trim()) return undefined;
+  const color = await pickColor();
+  if (color === undefined) return undefined; // cancelled the colour step
+  const id = `grp-${Date.now().toString(36)}`;
+  await view.upsertGroup(id, { name: name.trim(), color: color ?? null });
+  return id;
+}
+
+/** Assign one or more sessions to a group (or unassign). Offers existing
+ *  groups + "Nuevo grupo…" + "Quitar del grupo". */
+async function assignToGroup(
+  view: SessionsView,
+  items: SessionRef[],
+  directGroupId?: string
+): Promise<void> {
+  if (items.length === 0) return;
+
+  // Drag & drop onto a group bucket assigns directly, no picker.
+  if (directGroupId !== undefined) {
+    const target = directGroupId === "__none__" ? null : directGroupId;
+    for (const it of items) {
+      await view.assignSessionGroup(`${it.provider}:${it.id}`, target);
+    }
+    view.exitSelection();
+    return;
+  }
+
+  const defs = view.groupDefs();
+  const ids = Object.keys(defs);
+  type Item = vscode.QuickPickItem & { action: "new" | "none" | "set"; id?: string };
+  const choices: Item[] = [
+    { label: "$(add) Nuevo grupo…", action: "new" },
+    { label: "$(circle-slash) Quitar del grupo", action: "none" },
+    { label: "", kind: vscode.QuickPickItemKind.Separator, action: "set" },
+    ...ids.map(
+      (id): Item => ({
+        label: `${defs[id].icon ? defs[id].icon + " " : ""}${defs[id].name}`,
+        action: "set",
+        id,
+      })
+    ),
+  ];
+  const pick = await vscode.window.showQuickPick(choices, {
+    placeHolder:
+      items.length === 1
+        ? "Mover la sesión a…"
+        : `Mover ${items.length} sesiones a…`,
+  });
+  if (!pick) return;
+  let target: string | null;
+  if (pick.action === "new") {
+    const id = await createGroup(view);
+    if (!id) return;
+    target = id;
+  } else if (pick.action === "none") {
+    target = null;
+  } else {
+    target = pick.id ?? null;
+  }
+  for (const it of items) {
+    await view.assignSessionGroup(`${it.provider}:${it.id}`, target);
+  }
+  const where =
+    target && view.groupDefs()[target]
+      ? `«${view.groupDefs()[target].name}»`
+      : "sin grupo";
+  notifyInfo(
+    items.length === 1
+      ? `Agent Sessions: sesión movida a ${where}.`
+      : `Agent Sessions: ${items.length} sesiones movidas a ${where}.`
+  );
+  view.exitSelection();
+}
+
+/** Create / rename / recolour / re-icon / delete groups. */
+async function manageGroups(view: SessionsView): Promise<void> {
+  const defs = view.groupDefs();
+  const ids = Object.keys(defs);
+  const assignments = view.sessionGroupMap();
+  const countIn = (id: string) =>
+    Object.values(assignments).filter((g) => g === id).length;
+
+  if (ids.length === 0) {
+    await createGroup(view);
+    return;
+  }
+  type Item = vscode.QuickPickItem & { action: "new" | "edit"; id?: string };
+  const pick = await vscode.window.showQuickPick(
+    [
+      { label: "$(add) Nuevo grupo…", action: "new" } as Item,
+      { label: "", kind: vscode.QuickPickItemKind.Separator, action: "edit" } as Item,
+      ...ids.map(
+        (id): Item => ({
+          label: `${defs[id].icon ? defs[id].icon + " " : ""}${defs[id].name}`,
+          description: `${countIn(id)} sesión(es)`,
+          action: "edit",
+          id,
+        })
+      ),
+    ],
+    { placeHolder: "Gestionar grupos" }
+  );
+  if (!pick) return;
+  if (pick.action === "new") {
+    await createGroup(view);
+    return;
+  }
+  const id = pick.id!;
+  const def = defs[id];
+  const act = await vscode.window.showQuickPick(
+    [
+      { label: "$(edit) Renombrar", action: "rename" },
+      { label: "$(symbol-color) Color", action: "color" },
+      { label: "$(star-empty) Icono", action: "icon" },
+      { label: "$(trash) Eliminar grupo", action: "delete" },
+    ],
+    { placeHolder: def.name }
+  );
+  if (!act) return;
+  switch (act.action) {
+    case "rename": {
+      const name = await vscode.window.showInputBox({
+        title: "Renombrar grupo",
+        value: def.name,
+      });
+      if (!name || !name.trim()) return;
+      await view.upsertGroup(id, { ...def, name: name.trim() });
+      return;
+    }
+    case "color": {
+      const color = await pickColor();
+      if (color === undefined) return;
+      await view.upsertGroup(id, { ...def, color: color ?? null });
+      return;
+    }
+    case "icon": {
+      const icon = await pickIcon(def.icon ?? undefined);
+      if (icon === undefined) return;
+      await view.upsertGroup(id, { ...def, icon: icon ?? null });
+      return;
+    }
+    case "delete": {
+      const confirm = await notifyWarn(
+        `¿Eliminar el grupo «${def.name}»? Las sesiones no se borran, solo se desagrupan.`,
+        { modal: true } as vscode.MessageOptions,
+        "Eliminar grupo"
+      );
+      if (confirm !== "Eliminar grupo") return;
+      await view.deleteGroup(id);
+      return;
+    }
+  }
+}
+
 async function clearMetadata(view: SessionsView, s: Session): Promise<void> {
   try {
     await runCli(["metadata-clear", s.provider, s.id]);
     view.applyMetadata(s.provider, s.id, null);
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo limpiar metadata (${(e as Error).message}).`
     );
   }
@@ -2069,7 +2937,7 @@ async function patchMetadata(
     );
     view.applyMetadata(provider, id, next);
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo guardar metadata (${(e as Error).message}).`
     );
   }
@@ -2138,7 +3006,7 @@ async function clearProjectMetadata(
     await runCli(["projects-clear", cwd]);
     view.applyProject(cwd, null);
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo limpiar el proyecto (${(e as Error).message}).`
     );
   }
@@ -2156,7 +3024,7 @@ async function patchProject(
     );
     view.applyProject(cwd, next);
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo guardar el proyecto (${(e as Error).message}).`
     );
   }
@@ -2183,7 +3051,7 @@ async function moveSessionToProject(
   if (!id || !sourceCwd || !destCwd || sourceCwd === destCwd) return;
   try {
     await runCli(["move", id, sourceCwd, destCwd]);
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: movida a ${path.basename(destCwd) || destCwd}.`
     );
     await view.refresh();
@@ -2195,7 +3063,7 @@ async function moveSessionToProject(
     else if (raw === "COLLISION")
       msg = "Ya existe una sesión con ese id en el proyecto destino.";
     else msg = `No se pudo mover: ${raw}`;
-    vscode.window.showWarningMessage(`Agent Sessions: ${msg}`);
+    notifyWarn(`Agent Sessions: ${msg}`);
   }
 }
 
@@ -2217,16 +3085,16 @@ async function exportSession(s: Session): Promise<void> {
       target.fsPath,
     ]);
     if (result.written === 0) {
-      vscode.window.showWarningMessage(
+      notifyWarn(
         "Agent Sessions: nada que exportar (sesión no localizada en disco)."
       );
     } else {
-      vscode.window.showInformationMessage(
+      notifyInfo(
         `Agent Sessions: exportada a ${result.dest}`
       );
     }
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: export falló (${(e as Error).message}).`
     );
   }
@@ -2248,10 +3116,10 @@ async function importArchive(view: SessionsView): Promise<void> {
       `omitidas ${outcome.skippedExisting.length} existentes`,
       `${outcome.skippedMissing.length} sin datos`,
     ];
-    vscode.window.showInformationMessage(`Agent Sessions: ${parts.join(", ")}.`);
+    notifyInfo(`Agent Sessions: ${parts.join(", ")}.`);
     await view.refresh();
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: import falló (${(e as Error).message}).`
     );
   }
@@ -2286,14 +3154,14 @@ async function searchContent(view: SessionsView): Promise<void> {
     hits = (await runCli<ContentHit[]>(["search-content", query])) || [];
   } catch (e) {
     status.dispose();
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: búsqueda falló (${(e as Error).message}).`
     );
     return;
   }
   status.dispose();
   if (hits.length === 0) {
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: sin resultados para "${query}".`
     );
     return;
@@ -2311,7 +3179,7 @@ async function searchContent(view: SessionsView): Promise<void> {
   const session = (view as any).scan.sessions.find(
     (s: Session) => s.provider === pick.hit.provider && s.id === pick.hit.id
   ) as Session | undefined;
-  if (session) await preview(session);
+  if (session) await preview(view, session);
 }
 
 // ── Launch templates ────────────────────────────────────────────────────────
@@ -2333,12 +3201,12 @@ async function saveTemplate(view: SessionsView): Promise<void> {
   try {
     providers = await runCli<ProviderInfo[]>(["providers"]);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const usable = providers.filter((p) => p.binaryFound);
   if (usable.length === 0) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: ningún agente disponible para asociar a la plantilla."
     );
     return;
@@ -2380,11 +3248,11 @@ async function saveTemplate(view: SessionsView): Promise<void> {
   };
   try {
     await runCli(["templates-set", id], JSON.stringify(tpl));
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: plantilla "${tpl.name}" guardada.`
     );
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo guardar (${(e as Error).message}).`
     );
   }
@@ -2395,11 +3263,11 @@ async function runTemplate(view: SessionsView): Promise<void> {
   try {
     templates = (await runCli<LaunchTemplate[]>(["templates-get"])) || [];
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   if (templates.length === 0) {
-    vscode.window.showInformationMessage(
+    notifyInfo(
       "Agent Sessions: aún no tienes plantillas. Usa “Guardar plantilla…”."
     );
     return;
@@ -2424,12 +3292,12 @@ async function runTemplate(view: SessionsView): Promise<void> {
   try {
     providers = await runCli<ProviderInfo[]>(["providers"]);
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   const info = providers.find((p) => p.id === t.provider);
   if (!info || !info.binaryFound) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       `Agent Sessions: el binario de ${t.provider} no está disponible.`
     );
     return;
@@ -2453,11 +3321,11 @@ async function manageTemplates(): Promise<void> {
   try {
     templates = (await runCli<LaunchTemplate[]>(["templates-get"])) || [];
   } catch (e) {
-    vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
     return;
   }
   if (templates.length === 0) {
-    vscode.window.showInformationMessage(
+    notifyInfo(
       "Agent Sessions: no hay plantillas que gestionar."
     );
     return;
@@ -2478,12 +3346,12 @@ async function manageTemplates(): Promise<void> {
     try {
       await runCli(["templates-delete", p.tpl.id]);
     } catch (e) {
-      vscode.window.showWarningMessage(
+      notifyWarn(
         `Agent Sessions: no se pudo borrar ${p.tpl.name} (${(e as Error).message}).`
       );
     }
   }
-  vscode.window.showInformationMessage(
+  notifyInfo(
     `Agent Sessions: borradas ${picks.length} plantilla(s).`
   );
 }
@@ -2504,11 +3372,11 @@ async function backupCatalog(): Promise<void> {
       "backup",
       target.fsPath,
     ]);
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: backup escrito (${result.written} ficheros) → ${result.dest}`
     );
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: backup falló (${(e as Error).message}).`
     );
   }
@@ -2522,7 +3390,7 @@ async function restoreCatalog(view: SessionsView): Promise<void> {
     filters: { "Catalog backup": ["zip"] },
   });
   if (!picked || picked.length === 0) return;
-  const confirm = await vscode.window.showWarningMessage(
+  const confirm = await notifyWarn(
     "Esto sobrescribe tu metadata local (rename/tags/color/notas/favoritos), alias de proyectos y plantillas. ¿Continuar?",
     { modal: true },
     "Restaurar"
@@ -2533,12 +3401,12 @@ async function restoreCatalog(view: SessionsView): Promise<void> {
       "restore",
       picked[0].fsPath,
     ]);
-    vscode.window.showInformationMessage(
+    notifyInfo(
       `Agent Sessions: restaurados ${outcome.restored.join(", ") || "(ningún fichero)"}.`
     );
     await view.refresh();
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: restore falló (${(e as Error).message}).`
     );
   }
@@ -2564,6 +3432,8 @@ async function setGroupBy(view: SessionsView): Promise<void> {
     { label: "Proveedor", value: "provider" },
     { label: "Proyecto", value: "project" },
     { label: "Cascada", value: "cascade" },
+    { label: "Fecha", value: "date" },
+    { label: "Grupo", value: "group" },
   ];
   const pick = await vscode.window.showQuickPick(
     options.map((o) => ({
@@ -2592,7 +3462,7 @@ async function quickActions(view: SessionsView): Promise<void> {
     sessions = view.sessionsSnapshot();
   }
   if (sessions.length === 0) {
-    vscode.window.showInformationMessage("Agent Sessions: no hay sesiones.");
+    notifyInfo("Agent Sessions: no hay sesiones.");
     return;
   }
   const sorted = [...sessions].sort((a, b) => b.lastActivity - a.lastActivity);
@@ -2642,12 +3512,12 @@ function registerTerminalProfiles(context: vscode.ExtensionContext): void {
           try {
             infos = await runCli<ProviderInfo[]>(["providers"]);
           } catch (e) {
-            vscode.window.showErrorMessage(`Agent Sessions: ${(e as Error).message}`);
+            notifyError(`Agent Sessions: ${(e as Error).message}`);
             return undefined;
           }
           const info = infos.find((p) => p.id === id);
           if (!info || !info.binaryFound || info.newSessionArgv.length === 0) {
-            vscode.window.showWarningMessage(
+            notifyWarn(
               `Agent Sessions: el binario de ${info?.displayName ?? id} no está disponible en el PATH.`
             );
             return undefined;
@@ -2699,7 +3569,7 @@ async function configureMcp(): Promise<void> {
       2
     );
     await vscode.env.clipboard.writeText(snippet);
-    vscode.window.showInformationMessage(
+    notifyInfo(
       "Agent Sessions: configuración MCP copiada al portapapeles."
     );
     return;
@@ -2707,7 +3577,7 @@ async function configureMcp(): Promise<void> {
 
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: abre una carpeta para escribir .vscode/mcp.json."
     );
     return;
@@ -2719,7 +3589,7 @@ async function configureMcp(): Promise<void> {
   try {
     if (fs.existsSync(file)) json = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
-    vscode.window.showWarningMessage(
+    notifyWarn(
       "Agent Sessions: .vscode/mcp.json no es JSON válido; se reescribe con solo el servidor de Agent Sessions."
     );
     json = {};
@@ -2738,14 +3608,344 @@ async function configureMcp(): Promise<void> {
     await fs.promises.writeFile(file, JSON.stringify(json, null, 2) + "\n", "utf8");
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
     await vscode.window.showTextDocument(doc);
-    vscode.window.showInformationMessage(
+    notifyInfo(
       "Agent Sessions: servidor MCP añadido a .vscode/mcp.json. Arráncalo desde el propio fichero (botón ▶ Start)."
     );
   } catch (e) {
-    vscode.window.showErrorMessage(
+    notifyError(
       `Agent Sessions: no se pudo escribir mcp.json (${(e as Error).message}).`
     );
   }
+}
+
+// ── Panel actions menu (all extension commands, outside the palette) ─────────
+
+/** A QuickPick "command center" listing every extension action, grouped, so the
+ *  user can reach them from the panel without the VS Code command palette. Each
+ *  entry just runs the already-registered command. */
+async function showActionsMenu(): Promise<void> {
+  type Item = vscode.QuickPickItem & { command?: string };
+  const sep = (label: string): Item => ({
+    label,
+    kind: vscode.QuickPickItemKind.Separator,
+  });
+  const items: Item[] = [
+    sep("Lanzar"),
+    { label: "$(add) Nueva sesión…", command: "agentSessions.newSession" },
+    {
+      label: "$(multiple-windows) Nueva sesión en varios proyectos…",
+      command: "agentSessions.newSessionMulti",
+    },
+    { label: "$(sparkle) Lanzar agente recomendado", command: "agentSessions.smartLaunch" },
+    { label: "$(rocket) Lanzar plantilla…", command: "agentSessions.runTemplate" },
+    {
+      label: "$(repo-forked) Lanzar comparativa paralela…",
+      command: "agentSessions.launchParallel",
+    },
+    sep("Buscar / filtrar / agrupar"),
+    { label: "$(search) Buscar en contenido…", command: "agentSessions.searchContent" },
+    { label: "$(filter) Filtrar sesiones…", command: "agentSessions.setFilter" },
+    { label: "$(clear-all) Limpiar filtro", command: "agentSessions.clearFilter" },
+    { label: "$(list-tree) Agrupar por…", command: "agentSessions.setGroupBy" },
+    { label: "$(list-selection) Acciones rápidas de sesión…", command: "agentSessions.quickActions" },
+    sep("Proyectos"),
+    { label: "$(terminal) Comandos del proyecto…", command: "agentSessions.projectCommands" },
+    { label: "$(edit) Renombrar proyecto…", command: "agentSessions.renameProject" },
+    { label: "$(symbol-color) Color del proyecto…", command: "agentSessions.setProjectColor" },
+    { label: "$(star-empty) Icono del proyecto…", command: "agentSessions.setProjectIcon" },
+    {
+      label: "$(folder-opened) Añadir proyecto al workspace…",
+      command: "agentSessions.addProjectToWorkspace",
+    },
+    {
+      label: "$(clear-all) Limpiar alias/color del proyecto",
+      command: "agentSessions.clearProjectMetadata",
+    },
+    sep("Grupos y etiquetas"),
+    { label: "$(group-by-ref-type) Gestionar grupos…", command: "agentSessions.manageGroups" },
+    { label: "$(tag) Gestionar catálogo de etiquetas…", command: "agentSessions.manageTagCatalog" },
+    sep("Plantillas"),
+    { label: "$(save) Guardar plantilla…", command: "agentSessions.saveTemplate" },
+    { label: "$(list-unordered) Gestionar plantillas…", command: "agentSessions.manageTemplates" },
+    sep("Mantenimiento"),
+    { label: "$(trash) Eliminar sesiones por fecha…", command: "agentSessions.deleteByDate" },
+    { label: "$(cloud-upload) Importar .zip…", command: "agentSessions.import" },
+    { label: "$(archive) Backup del catálogo…", command: "agentSessions.backupCatalog" },
+    { label: "$(history) Restaurar catálogo…", command: "agentSessions.restoreCatalog" },
+    { label: "$(server-process) Configurar servidor MCP…", command: "agentSessions.configureMcp" },
+    { label: "$(diff) Comparar resultados de worktrees…", command: "agentSessions.compareWorktrees" },
+    { label: "$(trash) Limpiar worktrees de comparativa…", command: "agentSessions.cleanupWorktrees" },
+    { label: "$(refresh) Refrescar", command: "agentSessions.refresh" },
+  ];
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Acciones de Agent Sessions",
+    matchOnDescription: true,
+  });
+  if (!pick || !pick.command) return;
+  await vscode.commands.executeCommand(pick.command);
+}
+
+// ── Project commands explorer ───────────────────────────────────────────────
+// Surfaces the commands available *for a project*: the agent's custom
+// slash-commands (.claude/commands/**), the repo's runnable scripts
+// (package.json / Makefile / justfile / Cargo) and the project-scoped
+// extension actions — all in one QuickPick.
+
+interface SlashCommand {
+  name: string; // includes leading "/"
+  description: string;
+  scope: string; // "proyecto" | "usuario"
+}
+
+/** Read a slash-command's description from its `.md`: the frontmatter
+ *  `description:` if present, else the first non-empty, non-heading line. */
+function readCommandDescription(file: string): string {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+  const fm = text.match(/^---\s*[\r\n]([\s\S]*?)[\r\n]---/);
+  if (fm) {
+    const d = fm[1].match(/^description:\s*(.+)$/m);
+    if (d) return d[1].trim().replace(/^["']|["']$/g, "");
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith("---") || t.startsWith("#")) continue;
+    return t.slice(0, 100);
+  }
+  return "";
+}
+
+/** Walk a `.claude/commands` tree collecting `.md` files as slash-commands.
+ *  Sub-directories become `:`-namespaced (foo/bar.md → /foo:bar). */
+function collectSlashCommands(
+  baseDir: string,
+  scope: string,
+  out: SlashCommand[]
+): void {
+  if (!fs.existsSync(baseDir)) return;
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.isFile() && e.name.endsWith(".md")) {
+        const rel = path.relative(baseDir, full).replace(/\.md$/i, "");
+        const name = "/" + rel.split(path.sep).join(":");
+        out.push({ name, description: readCommandDescription(full), scope });
+      }
+    }
+  };
+  walk(baseDir);
+}
+
+function discoverSlashCommands(cwd: string): SlashCommand[] {
+  const out: SlashCommand[] = [];
+  collectSlashCommands(path.join(cwd, ".claude", "commands"), "proyecto", out);
+  collectSlashCommands(
+    path.join(os.homedir(), ".claude", "commands"),
+    "usuario",
+    out
+  );
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+interface ScriptCommand {
+  label: string;
+  description: string;
+  command: string; // shell line to run
+}
+
+function detectPackageManager(cwd: string): string {
+  if (fs.existsSync(path.join(cwd, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs.existsSync(path.join(cwd, "yarn.lock"))) return "yarn";
+  if (fs.existsSync(path.join(cwd, "bun.lockb"))) return "bun";
+  return "npm";
+}
+
+/** Build the `run` invocation for a package.json script with the detected PM. */
+function npmRun(pm: string, script: string): string {
+  if (pm === "yarn") return `yarn ${script}`;
+  if (pm === "pnpm") return `pnpm ${script}`;
+  if (pm === "bun") return `bun run ${script}`;
+  return `npm run ${script}`;
+}
+
+function discoverScripts(cwd: string): ScriptCommand[] {
+  const out: ScriptCommand[] = [];
+  // package.json scripts.
+  const pkgPath = path.join(cwd, "package.json");
+  if (fs.existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      const pm = detectPackageManager(cwd);
+      for (const [name, body] of Object.entries(pkg.scripts || {})) {
+        out.push({
+          label: name,
+          description: `npm · ${String(body).slice(0, 80)}`,
+          command: npmRun(pm, name),
+        });
+      }
+    } catch {
+      /* malformed package.json — skip */
+    }
+  }
+  // Makefile targets.
+  for (const mk of ["Makefile", "makefile", "GNUmakefile"]) {
+    const p = path.join(cwd, mk);
+    if (!fs.existsSync(p)) continue;
+    try {
+      const text = fs.readFileSync(p, "utf8");
+      const seen = new Set<string>();
+      const re = /^([a-zA-Z0-9][a-zA-Z0-9_.\-]*)\s*:(?!=)/gm;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const t = m[1];
+        if (t.startsWith(".") || seen.has(t)) continue;
+        seen.add(t);
+        out.push({ label: t, description: "make", command: `make ${t}` });
+      }
+    } catch {
+      /* skip */
+    }
+    break;
+  }
+  // justfile recipes.
+  for (const jf of ["justfile", "Justfile", ".justfile"]) {
+    const p = path.join(cwd, jf);
+    if (!fs.existsSync(p)) continue;
+    try {
+      const text = fs.readFileSync(p, "utf8");
+      const seen = new Set<string>();
+      const re = /^([a-zA-Z0-9][a-zA-Z0-9_-]*)(\s+[^:#\n]*)?:/gm;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const t = m[1];
+        if (seen.has(t)) continue;
+        seen.add(t);
+        out.push({ label: t, description: "just", command: `just ${t}` });
+      }
+    } catch {
+      /* skip */
+    }
+    break;
+  }
+  // Cargo: standard subcommands when a manifest is present.
+  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) {
+    for (const sub of ["build", "test", "run", "check", "clippy"]) {
+      out.push({ label: `cargo ${sub}`, description: "cargo", command: `cargo ${sub}` });
+    }
+  }
+  return out;
+}
+
+/** Run a shell command in a fresh integrated terminal rooted at `cwd`. */
+function runInTerminal(cwd: string, label: string, command: string): void {
+  const terminal = vscode.window.createTerminal({ name: `▶ ${label}`, cwd });
+  terminal.show();
+  terminal.sendText(command, true);
+}
+
+/** Launch a Claude session in `cwd` and send a custom slash-command. */
+async function launchSlashCommand(
+  cwd: string,
+  name: string
+): Promise<void> {
+  const args = await vscode.window.showInputBox({
+    title: `${name}`,
+    prompt: "Argumentos para el comando (opcional)",
+  });
+  if (args === undefined) return; // cancelled
+  const full = args.trim() ? `${name} ${args.trim()}` : name;
+  let providers: ProviderInfo[];
+  try {
+    providers = await runCli<ProviderInfo[]>(["providers"]);
+  } catch (e) {
+    notifyError(`Agent Sessions: ${(e as Error).message}`);
+    return;
+  }
+  const claude = providers.find((p) => p.id === "claude");
+  if (!claude || !claude.binaryFound) {
+    notifyWarn("Agent Sessions: el binario de Claude no está disponible en PATH.");
+    return;
+  }
+  const terminal = launch("✦ Claude", cwd, claude.newSessionArgv);
+  if (terminal) setTimeout(() => terminal.sendText(full, false), 2500);
+}
+
+/** Show every command available for a project in one QuickPick. */
+async function showProjectCommands(view: SessionsView, cwd?: string): Promise<void> {
+  const c = await pickProjectCwd(view, cwd);
+  if (!c) return;
+
+  type Item = vscode.QuickPickItem & { run?: () => void | Promise<void> };
+  const items: Item[] = [];
+
+  const slash = discoverSlashCommands(c);
+  if (slash.length) {
+    items.push({
+      label: "Slash-commands del agente",
+      kind: vscode.QuickPickItemKind.Separator,
+    });
+    for (const s of slash) {
+      items.push({
+        label: `$(comment) ${s.name}`,
+        description: s.scope,
+        detail: s.description || undefined,
+        run: () => launchSlashCommand(c, s.name),
+      });
+    }
+  }
+
+  const scripts = discoverScripts(c);
+  if (scripts.length) {
+    items.push({
+      label: "Scripts del proyecto",
+      kind: vscode.QuickPickItemKind.Separator,
+    });
+    for (const sc of scripts) {
+      items.push({
+        label: `$(play) ${sc.label}`,
+        description: sc.description,
+        run: () => runInTerminal(c, sc.label, sc.command),
+      });
+    }
+  }
+
+  // Project-scoped extension actions.
+  items.push({ label: "Acciones", kind: vscode.QuickPickItemKind.Separator });
+  items.push({
+    label: "$(add) Nueva sesión aquí",
+    run: () => newSession(view, c),
+  });
+  items.push({
+    label: "$(terminal) Abrir terminal aquí",
+    run: () => openTerminalAt(c, view.projectAliasFor(c) || path.basename(c) || c),
+  });
+  items.push({
+    label: "$(folder-opened) Añadir carpeta al workspace",
+    run: () => addProjectToWorkspace(c),
+  });
+  items.push({
+    label: "$(rocket) Lanzar plantilla…",
+    run: () => runTemplate(view),
+  });
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: `Comandos para ${displayPath(c)}`,
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (!pick || !pick.run) return;
+  await pick.run();
 }
 
 // ── Activation ───────────────────────────────────────────────────────────────
@@ -2773,6 +3973,19 @@ export function activate(context: vscode.ExtensionContext): void {
       smartLaunch(view)
     ),
     vscode.commands.registerCommand("agentSessions.import", () => importArchive(view)),
+    vscode.commands.registerCommand("agentSessions.newSessionMulti", () =>
+      newSessionMulti(view)
+    ),
+    vscode.commands.registerCommand("agentSessions.deleteByDate", () =>
+      deleteByDate(view)
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.addProjectToWorkspace",
+      async (cwd?: string) => {
+        const c = await pickProjectCwd(view, cwd);
+        if (c) addProjectToWorkspace(c);
+      }
+    ),
     vscode.commands.registerCommand("agentSessions.launchParallel", launchParallel),
     vscode.commands.registerCommand("agentSessions.compareWorktrees", compareWorktrees),
     vscode.commands.registerCommand("agentSessions.cleanupWorktrees", cleanupWorktrees),
@@ -2809,6 +4022,19 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentSessions.setProjectColor", (cwd?: string) =>
       setProjectColor(view, { cwd })
     ),
+    vscode.commands.registerCommand("agentSessions.setProjectIcon", (cwd?: string) =>
+      editProjectIcon(view, cwd)
+    ),
+    vscode.commands.registerCommand("agentSessions.manageGroups", () =>
+      manageGroups(view)
+    ),
+    vscode.commands.registerCommand(
+      "agentSessions.projectCommands",
+      (cwd?: string) => showProjectCommands(view, cwd)
+    ),
+    vscode.commands.registerCommand("agentSessions.actionsMenu", () =>
+      showActionsMenu()
+    ),
     vscode.commands.registerCommand(
       "agentSessions.clearProjectMetadata",
       (cwd?: string) => clearProjectMetadata(view, { cwd })
@@ -2817,7 +4043,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (
         e.affectsConfiguration("agentSessions.groupBy") ||
-        e.affectsConfiguration("agentSessions.costAlertDaily")
+        e.affectsConfiguration("agentSessions.costAlertDaily") ||
+        e.affectsConfiguration("agentSessions.claudeContextWindow")
       )
         view.push();
     })

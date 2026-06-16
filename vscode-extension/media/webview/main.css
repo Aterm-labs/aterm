@@ -396,6 +396,20 @@ body {
 .search-hit .avatar {
   flex: 0 0 auto;
 }
+/* Custom emoji icon: drop the coloured disc, let the glyph stand on its own. */
+.card .avatar.emoji {
+  background: transparent;
+  color: inherit;
+  font-size: 17px;
+}
+/* Per-project emoji shown in the bucket header, in place of the colour swatch. */
+.bucket .bucket-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1;
+  text-transform: none;
+  letter-spacing: 0;
+}
 .card .avatar.live::after {
   content: "";
   position: absolute;
@@ -523,6 +537,79 @@ body {
 .card .actions button {
   width: 22px;
   height: 22px;
+}
+
+/* ── Modo selección (multi-abrir / multi-borrar) ───────────────────────── */
+/* A checkbox occupies the avatar's grid cell while in select mode, so the
+   card layout stays put (no reflow when toggling the mode). */
+.card .select-box {
+  grid-row: 1 / span 2;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.card .select-box input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--vscode-charts-blue, var(--vscode-focusBorder));
+}
+body.selecting .card {
+  cursor: default;
+}
+body.selecting .card .actions,
+body.selecting .card .star,
+body.selecting .card .note-indicator,
+body.selecting .card .archive-indicator {
+  display: none !important;
+}
+.card.selected {
+  background: color-mix(in srgb, var(--vscode-charts-blue) 16%, transparent);
+}
+
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--vscode-panel-border, transparent);
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+}
+.selection-count {
+  font-weight: 600;
+  font-size: calc(var(--vscode-font-size) - 1px);
+  white-space: nowrap;
+}
+.selection-spacer {
+  flex: 1 1 auto;
+}
+.sel-btn {
+  font: inherit;
+  font-size: calc(var(--vscode-font-size) - 1px);
+  padding: 3px 10px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  cursor: pointer;
+}
+.sel-btn:hover {
+  filter: brightness(1.1);
+}
+.sel-btn.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+.sel-btn.danger {
+  background: color-mix(in srgb, var(--vscode-charts-red) 26%, transparent);
+  color: var(--vscode-foreground);
+}
+.sel-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ── Filter header banner ─────────────────────────────────────────────── */

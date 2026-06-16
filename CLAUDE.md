@@ -167,6 +167,43 @@ construye el sidecar para esa plataforma y lo empaqueta en el `.vsix` bajo
   agentes + prompt → un `git worktree` por agente + terminal por worktree con
   el mismo prompt pegado. Es la feature killer de JetBrains Air, en OSS y en
   cualquier carpeta git.
+- ✅ **Extensión — mejoras de issues (2026-06-16)**: implementadas **solo en la
+  extensión de VS Code** (sin tocar el core Rust, para no arriesgar la interop
+  con la app nativa). (#1) **compactar con instrucciones** (prompt opcional que
+  se inyecta como `/compact <texto>` en el argv, lado extensión). (#2) **control
+  de notificaciones**: setting `notificationLevel` (all/important/errors/none) +
+  helpers `notifyInfo/notifyWarn/notifyError` (los diálogos modales interactivos
+  nunca se suprimen, se detectan por sus items) + dedupe anti-flapping en los
+  toasts de estado en vivo. (#3) **preview estilada**: panel webview reutilizable
+  con cabecera de metadatos + turnos en burbujas y mini-render Markdown, en vez
+  del documento `.md` plano. (#4) **borrado por fecha / multiselección**: modo
+  selección con checkboxes y barra de acciones (abrir/eliminar N) + comando
+  «Eliminar sesiones por fecha…». (#5) **abrir varias** (multiselección) y
+  «Nueva sesión en varios proyectos…». (#6) **subproyectos + grupos
+  manuales**: la vista por proyecto anida los cwd descendientes bajo su
+  ancestro (jerarquía derivada del path); **además**, grupos/colecciones
+  definidos por el usuario (nombre+color+icono) con su propia vista
+  `groupBy=group`, asignación desde el menú de sesión, la barra de
+  multiselección y **drag&drop** a un bucket de grupo, y «Gestionar grupos…».
+  Persistidos en `globalState` (sin tocar la metadata compartida). (#7) **iconos/emojis** por sesión y por
+  proyecto, guardados en `globalState` de la extensión (no en la metadata
+  compartida). (#8) botón/comando «Añadir carpeta al workspace»
+  (`updateWorkspaceFolders`). **Comandos del proyecto** (botón en la cabecera del
+  bucket de proyecto + comando «Comandos del proyecto…»): un QuickPick que reúne
+  los **slash-commands del agente** (`.claude/commands/**`, namespaced por
+  subdir, descripción del frontmatter; lanza Claude en el cwd y envía `/cmd`),
+  los **scripts del repo** (package.json con PM autodetectado, Makefile,
+  justfile, Cargo) ejecutados en terminal, y las **acciones de la extensión**
+  por proyecto. **Menú de acciones «⋯»** en la toolbar del panel (`actionsMenu`):
+  QuickPick con *todas* las acciones de la extensión agrupadas (lanzar,
+  buscar/filtrar, proyectos, grupos/etiquetas, plantillas, mantenimiento), para
+  usarlas sin la paleta de comandos. Bug de paso: `currentGroupMode()` ya
+  conserva el modo `date`.
+  **% de contexto**: el core infiere la ventana de Claude (200k, sube a 1M solo
+  si el uso supera 200k), lo que **infla el %** para cuentas con ventana de 1M
+  cuando el uso está por debajo de 200k (los logs no registran la ventana ni el
+  flag `[1m]`). Mitigado con el setting `claudeContextWindow` (auto/200k/1m),
+  aplicado en card, filtro `ctx` y preview — sin tocar el core.
 - ⏳ **Fase 5 (render GPU)**: no hecha por diseño — opcional, solo si el throughput
   lo justifica (ver roadmap).
 - ⏳ **Pendientes menores**: import solo a Claude (el `.zip` es formato Claude);

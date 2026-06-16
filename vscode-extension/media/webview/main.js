@@ -34,6 +34,10 @@ try {
     sessions: [],
     metadata: {},
     projects: { names: {}, colors: {} },
+    sessionIcons: {},
+    projectIcons: {},
+    groups: {},
+    sessionGroups: {},
     quotas: {},
     serviceStatus: {},
     activeKeys: [],
@@ -41,6 +45,7 @@ try {
     filter: "",
     home: "",
     costAlertDaily: 0,
+    claudeContextWindow: "auto",
     // Webview-local (not pushed by the extension): full-text content search
     // results. When set ({query, hits}), the panel shows results instead of
     // the session tree.
@@ -54,6 +59,13 @@ try {
   if (ui.density !== "compact") ui.density = "comfortable";
 
   const NO_PROJECT = "(sin proyecto)";
+
+  // ── Modo selección (multi-abrir / multi-borrar) ──────────────────────────
+  // Not persisted: a transient mode the user opts into, picks cards, acts, exits.
+  let selectMode = false;
+  /** Set of `provider:id` keys currently ticked. */
+  const selected = new Set();
+  const sessionKey = (s) => `${s.provider}:${s.id}`;
 
   // ── Icons ─────────────────────────────────────────────────────────────────
   const ICONS = {
@@ -69,6 +81,8 @@ try {
     star: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="m8 1.5 1.93 4.18 4.57.43-3.45 3.04 1.02 4.5L8 11.27 3.93 13.65l1.02-4.5L1.5 6.11l4.57-.43L8 1.5Z"/></svg>`,
     note: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="M3 2h7l3 3v9H3V2Zm6.5 4V3L12 6H9.5ZM5 8h6v1H5V8Zm0 2.5h6v1H5v-1Z"/></svg>`,
     archive: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="M1.5 2h13v3h-13V2Zm1 4h11v8h-11V6Zm3.5 2v1.5h4V8H6Z"/></svg>`,
+    folderAdd: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="M1.5 3a.5.5 0 0 1 .5-.5h4.41l1 1H14a.5.5 0 0 1 .5.5v3.1A4.5 4.5 0 0 0 8.26 13.5H3a1.5 1.5 0 0 1-1.5-1.5V3Z"/><path fill="currentColor" d="M12 8.5h1.2v1.8H15v1.2h-1.8V13H12v-1.5h-1.8v-1.2H12V8.5Z"/></svg>`,
+    command: `<svg viewBox="0 0 16 16"><path fill="currentColor" d="M2 2h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Zm1.6 3.1.85.85L3 7.4l1.45 1.45-.85.85L1.3 7.4l2.3-2.3ZM7 9.3h3.2v1.2H7V9.3Z"/></svg>`,
   };
 
   // ── Provider colours (theme-aware via CSS vars) ──────────────────────────
@@ -139,6 +153,15 @@ try {
   };
   const metaFor = (s) => state.metadata[`${s.provider}:${s.id}`] || null;
   const projectKey = (s) => s.cwd || NO_PROJECT;
+  /** Context window for the % calc: Claude's is user-pinnable (the logs don't
+   *  record it), other providers report it. */
+  const effWindow = (s) => {
+    if (s.provider === "claude") {
+      if (state.claudeContextWindow === "200k") return 200000;
+      if (state.claudeContextWindow === "1m") return 1000000;
+    }
+    return s.contextWindow;
+  };
 
   /** Whitespace-separated AND of predicates. Three kinds:
    *   - `#tag`           — exact tag match (case-insensitive).
@@ -203,8 +226,8 @@ try {
     }
     if (key === "ctx" || key === "context") {
       // % context used (relative to window)
-      if (s.contextTokens && s.contextWindow)
-        return (s.contextTokens / s.contextWindow) * 100;
+      const w = effWindow(s);
+      if (s.contextTokens && w) return (s.contextTokens / w) * 100;
       return null;
     }
     return null;
@@ -259,7 +282,9 @@ try {
 
   function render() {
     try {
+      pruneSelection();
       doRender();
+      updateSelectionBar();
       // Report what actually ended up in the DOM so we can tell apart
       // "rendered nothing" from "rendered but invisible".
       diag("render done", {
@@ -480,6 +505,8 @@ try {
       renderProviderBuckets(filteredSessions, true);
     } else if (groupBy === "date") {
       renderDateBuckets(filteredSessions);
+    } else if (groupBy === "group") {
+      renderGroupBuckets(filteredSessions);
     } else {
       renderProviderBuckets(filteredSessions, false);
     }
@@ -591,23 +618,146 @@ try {
     return "older";
   }
 
+  /** True if `a` is a strict ancestor directory of `b`. */
+  function isAncestorPath(a, b) {
+    if (a === b) return false;
+    return b.startsWith(a + "/") || b.startsWith(a + "\\");
+  }
+
+  /** Project view, with sub-project nesting derived from the paths: a project
+   *  whose cwd lives under another project's cwd is rendered indented beneath
+   *  it (e.g. a monorepo with sessions in sub-packages). Projects with no
+   *  ancestor among the others stay top-level; "(sin proyecto)" sinks to the
+   *  bottom. */
   function renderProjectBuckets(sessions, /*root*/ _root) {
     const groups = bucketByProject(sessions);
-    for (const [cwd, items] of groups) {
+    const itemsByCwd = new Map(groups);
+    const order = groups.map((g) => g[0]); // recency order, preserved
+    const real = order.filter((c) => c !== NO_PROJECT);
+
+    // Nearest ancestor (longest matching prefix) among the projects with
+    // sessions becomes the parent; the rest are roots.
+    const childrenOf = new Map();
+    const roots = [];
+    for (const c of real) {
+      let parent = null;
+      for (const o of real) {
+        if (isAncestorPath(o, c) && (!parent || o.length > parent.length))
+          parent = o;
+      }
+      if (parent) {
+        if (!childrenOf.has(parent)) childrenOf.set(parent, []);
+        childrenOf.get(parent).push(c);
+      } else {
+        roots.push(c);
+      }
+    }
+
+    const renderNode = (cwd, depth) => {
+      const items = itemsByCwd.get(cwd) || [];
+      const kids = childrenOf.get(cwd) || [];
       const key = `project:${cwd}`;
+      const collapsed = !!ui.collapsed[key];
+      // Total including descendants, shown when it differs from direct count.
+      let total = items.length;
+      const stack = [...kids];
+      while (stack.length) {
+        const k = stack.pop();
+        total += (itemsByCwd.get(k) || []).length;
+        for (const gk of childrenOf.get(k) || []) stack.push(gk);
+      }
+      root.appendChild(
+        bucketHeader({
+          key,
+          label: depth === 0 ? projectLabel(cwd).toUpperCase() : projectLabel(cwd),
+          count: items.length,
+          subtotal: kids.length ? total : null,
+          accentVar: projectAccentVar(cwd),
+          cwd,
+          collapsed,
+          indent: depth,
+          nested: depth > 0,
+        })
+      );
+      if (collapsed) return;
+      if (items.length) root.appendChild(cardList(items));
+      for (const child of kids) renderNode(child, depth + 1);
+    };
+
+    for (const r of roots) renderNode(r, 0);
+
+    // Sessions with no cwd last, flat.
+    if (itemsByCwd.has(NO_PROJECT)) {
+      const items = itemsByCwd.get(NO_PROJECT);
+      const key = `project:${NO_PROJECT}`;
+      const collapsed = !!ui.collapsed[key];
+      root.appendChild(
+        bucketHeader({ key, label: NO_PROJECT.toUpperCase(), count: items.length, collapsed })
+      );
+      if (!collapsed) root.appendChild(cardList(items));
+    }
+  }
+
+  /** User-defined groups. Every defined group gets a bucket (even when empty,
+   *  so it's visible and manageable); sessions without a group fall into a
+   *  "(sin grupo)" bucket at the end. */
+  function renderGroupBuckets(sessions) {
+    const defs = state.groups || {};
+    const assign = state.sessionGroups || {};
+    const buckets = new Map();
+    const ungrouped = [];
+    for (const s of sessions) {
+      const gid = assign[sessionKey(s)];
+      if (gid && defs[gid]) {
+        if (!buckets.has(gid)) buckets.set(gid, []);
+        buckets.get(gid).push(s);
+      } else {
+        ungrouped.push(s);
+      }
+    }
+    const ids = Object.keys(defs);
+    if (ids.length === 0) {
+      root.appendChild(
+        el("p", {
+          class: "hint",
+          style: { padding: "12px 16px" },
+          html:
+            "Aún no tienes grupos. Crea uno desde el menú “⋯ → Mover a grupo…” " +
+            "de una sesión, o con el comando <strong>Gestionar grupos…</strong>.",
+        })
+      );
+    }
+    for (const id of ids) {
+      const items = buckets.get(id) || [];
+      const key = `group:${id}`;
       const collapsed = !!ui.collapsed[key];
       root.appendChild(
         bucketHeader({
           key,
-          label: projectLabel(cwd).toUpperCase(),
+          label:
+            (defs[id].icon ? defs[id].icon + " " : "") +
+            (defs[id].name || id).toUpperCase(),
           count: items.length,
-          accentVar: projectAccentVar(cwd),
-          cwd,
+          accentVar: defs[id].color || "",
           collapsed,
+          groupId: id,
         })
       );
-      if (collapsed) continue;
-      root.appendChild(cardList(items));
+      if (!collapsed && items.length) root.appendChild(cardList(items));
+    }
+    if (ungrouped.length) {
+      const key = "group:__none__";
+      const collapsed = !!ui.collapsed[key];
+      root.appendChild(
+        bucketHeader({
+          key,
+          label: "(SIN GRUPO)",
+          count: ungrouped.length,
+          collapsed,
+          groupId: "__none__",
+        })
+      );
+      if (!collapsed) root.appendChild(cardList(ungrouped));
     }
   }
 
@@ -648,14 +798,22 @@ try {
     serviceStatus = null,
     stateCounts = null,
     collapsed = false,
+    indent = 0,
+    subtotal = null,
+    groupId = null,
   }) {
-    const isDropTarget = cwd && cwd !== NO_PROJECT;
+    // Two kinds of drop target: project buckets (Claude move_session) and group
+    // buckets (assign-to-group, any provider, including the "(sin grupo)" one).
+    const isProjectDrop = cwd && cwd !== NO_PROJECT;
+    const isGroupDrop = groupId != null;
+    const isDropTarget = isProjectDrop || isGroupDrop;
     const node = el("div", {
       class: `bucket ${nested ? "nested" : ""} ${collapsed ? "collapsed" : ""}`,
       role: "treeitem",
       "aria-expanded": String(!collapsed),
       tabindex: "0",
       "data-key": key,
+      style: indent > 0 ? { paddingLeft: `${10 + indent * 14}px` } : undefined,
       onClick: () => toggleBucket(key),
       onKeydown: (e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -683,7 +841,16 @@ try {
             e.preventDefault();
             try {
               const data = JSON.parse(raw);
-              if (data.sourceCwd && data.sourceCwd !== cwd) {
+              if (isGroupDrop) {
+                post("assignGroup", {
+                  items: [{ provider: data.provider, id: data.id }],
+                  groupId,
+                });
+              } else if (
+                data.provider === "claude" &&
+                data.sourceCwd &&
+                data.sourceCwd !== cwd
+              ) {
                 post("moveSession", {
                   id: data.id,
                   sourceCwd: data.sourceCwd,
@@ -697,7 +864,11 @@ try {
         : undefined,
     });
     node.appendChild(el("span", { class: "chevron", html: ICONS.chevron }));
-    if (accentVar) {
+    const projIcon =
+      cwd && cwd !== NO_PROJECT ? state.projectIcons[cwd] : null;
+    if (projIcon) {
+      node.appendChild(el("span", { class: "bucket-icon", text: projIcon }));
+    } else if (accentVar) {
       node.appendChild(
         el("span", { class: "swatch", style: { background: accentVar } })
       );
@@ -706,7 +877,12 @@ try {
     node.appendChild(
       el("span", {
         class: "meta",
-        text: count === 1 ? "1 sesión" : `${count} sesiones`,
+        text:
+          subtotal != null && subtotal !== count
+            ? `${count} aquí · ${subtotal} con subproyectos`
+            : count === 1
+              ? "1 sesión"
+              : `${count} sesiones`,
       })
     );
     if (stateCounts) {
@@ -733,6 +909,18 @@ try {
         })
       );
       actions.appendChild(
+        actionBtn("Comandos del proyecto", ICONS.command, (e) => {
+          e.stopPropagation();
+          post("projectCommands", { cwd });
+        })
+      );
+      actions.appendChild(
+        actionBtn("Añadir carpeta al workspace", ICONS.folderAdd, (e) => {
+          e.stopPropagation();
+          post("addProjectToWorkspace", { cwd });
+        })
+      );
+      actions.appendChild(
         actionBtn("Renombrar proyecto", ICONS.edit, (e) => {
           e.stopPropagation();
           post("renameProject", { cwd });
@@ -742,6 +930,22 @@ try {
         actionBtn("Color del proyecto", ICONS.palette, (e) => {
           e.stopPropagation();
           post("setProjectColor", { cwd });
+        })
+      );
+      actions.appendChild(
+        actionBtn("Icono del proyecto", ICONS.star, (e) => {
+          e.stopPropagation();
+          post("setProjectIcon", { cwd });
+        })
+      );
+      node.appendChild(actions);
+    } else if (groupId && groupId !== "__none__") {
+      // Inline action for a group bucket: manage groups (rename/color/delete).
+      const actions = el("span", { class: "actions" });
+      actions.appendChild(
+        actionBtn("Gestionar grupos", ICONS.edit, (e) => {
+          e.stopPropagation();
+          post("manageGroups");
         })
       );
       node.appendChild(actions);
@@ -954,12 +1158,18 @@ try {
       (s.title && s.title.trim()) ||
       `(sin título) ${s.id.slice(0, 8)}`;
     const accent = s.cwd ? state.projects.colors[s.cwd] : null;
-    const inUse = state.activeKeys.includes(`${s.provider}:${s.id}`);
-    // Only Claude's on-disk layout is supported by `move_session` today, and
-    // an archived-only session has no original jsonl to move.
-    const dragOk = s.provider === "claude" && !!s.cwd && !s.archivedOnly;
+    const key = sessionKey(s);
+    const inUse = state.activeKeys.includes(key);
+    // Selectable in select mode unless it's an archived-only orphan (no live
+    // jsonl to open/delete the usual way).
+    const selectable = selectMode && !s.archivedOnly;
+    const isSelected = selectable && selected.has(key);
+    // Draggable for two drop targets: assigning to a group (any provider) and
+    // moving between projects (Claude-only, enforced at drop). Archived-only
+    // orphans and select mode opt out.
+    const dragOk = !s.archivedOnly && !selectMode;
     const node = el("div", {
-      class: `card ${inUse ? "in-use" : ""}`,
+      class: `card ${inUse ? "in-use" : ""} ${isSelected ? "selected" : ""}`,
       role: "treeitem",
       tabindex: "0",
       "data-session-id": s.id,
@@ -967,11 +1177,18 @@ try {
       draggable: dragOk ? "true" : "false",
       title: tooltipText(s, m, inUse),
       style: accent ? { "--card-accent": accent } : undefined,
-      onClick: () => post("resume", { provider: s.provider, id: s.id }),
+      onClick: () => {
+        if (selectable) {
+          toggleSelect(key);
+          return;
+        }
+        post("resume", { provider: s.provider, id: s.id });
+      },
       onKeydown: (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          post("resume", { provider: s.provider, id: s.id });
+          if (selectable) toggleSelect(key);
+          else post("resume", { provider: s.provider, id: s.id });
         }
       },
       onContextmenu: (e) => {
@@ -981,6 +1198,7 @@ try {
       onDragstart: dragOk
         ? (e) => {
             const payload = JSON.stringify({
+              provider: s.provider,
               id: s.id,
               sourceCwd: s.cwd,
             });
@@ -996,17 +1214,40 @@ try {
         : undefined,
     });
 
-    // Avatar: provider initial in a coloured circle; green dot if live.
-    node.appendChild(
-      el("span", {
-        class: `avatar ${s.isActive ? "live" : ""}`,
-        style: {
-          "--avatar-bg":
-            PROVIDER_AVATAR[s.provider] || "var(--vscode-charts-foreground)",
-        },
-        text: PROVIDER_INITIAL[s.provider] || s.provider[0].toUpperCase(),
-      })
-    );
+    // In select mode a checkbox takes the avatar's slot (same grid cell, so no
+    // layout shift). Archived-only orphans aren't selectable → keep the avatar.
+    if (selectable) {
+      const box = el("span", { class: "select-box" });
+      box.appendChild(
+        el("input", {
+          type: "checkbox",
+          checked: isSelected ? "checked" : false,
+          "aria-label": "Seleccionar sesión",
+          onClick: (e) => {
+            e.stopPropagation();
+            toggleSelect(key);
+          },
+        })
+      );
+      node.appendChild(box);
+    } else {
+      // Avatar: a custom emoji icon if set, else the provider initial in a
+      // coloured circle; green dot if live either way.
+      const icon = state.sessionIcons[key];
+      node.appendChild(
+        el("span", {
+          class: `avatar ${s.isActive ? "live" : ""} ${icon ? "emoji" : ""}`,
+          style: icon
+            ? undefined
+            : {
+                "--avatar-bg":
+                  PROVIDER_AVATAR[s.provider] || "var(--vscode-charts-foreground)",
+              },
+          title: `${s.provider}`,
+          text: icon || PROVIDER_INITIAL[s.provider] || s.provider[0].toUpperCase(),
+        })
+      );
+    }
 
     node.appendChild(el("span", { class: "title", text: title }));
 
@@ -1021,8 +1262,9 @@ try {
     });
     // Context % pill: how much of the model's window the latest turn used.
     // Colour-coded the same way as the quota badge (>= 60% warning, >= 80% hot).
-    if (s.contextTokens && s.contextWindow) {
-      const pct = Math.round((s.contextTokens / s.contextWindow) * 100);
+    const ctxWin = effWindow(s);
+    if (s.contextTokens && ctxWin) {
+      const pct = Math.round((s.contextTokens / ctxWin) * 100);
       let tone = "var(--vscode-charts-green)";
       if (pct >= 80) tone = "var(--vscode-charts-red)";
       else if (pct >= 60) tone = "var(--vscode-charts-orange)";
@@ -1032,7 +1274,7 @@ try {
         el("span", {
           class: "ctx-pct",
           style: { color: tone },
-          title: `${s.contextTokens.toLocaleString()} / ${s.contextWindow.toLocaleString()} tokens`,
+          title: `${s.contextTokens.toLocaleString()} / ${ctxWin.toLocaleString()} tokens`,
           text: `ctx ${pct}%`,
         })
       );
@@ -1445,10 +1687,90 @@ try {
     tagsBtn.setAttribute("aria-expanded", "false");
   }
 
+  // ── Selección múltiple ─────────────────────────────────────────────────
+  /** Sessions visible under the current filter that can be selected (i.e. not
+   *  archived-only orphans). The "select all" target and the action payloads. */
+  function visibleSelectable() {
+    return state.sessions.filter(
+      (s) => !s.archivedOnly && matchesFilter(s, state.filter)
+    );
+  }
+  function toggleSelect(key) {
+    if (selected.has(key)) selected.delete(key);
+    else selected.add(key);
+    render();
+    updateSelectionBar();
+  }
+  function updateSelectionBar() {
+    if (!selectionBar) return;
+    selectionBar.hidden = !selectMode;
+    const n = selected.size;
+    selectionCount.textContent =
+      n === 1 ? "1 seleccionada" : `${n} seleccionadas`;
+    selectionOpen.disabled = n === 0;
+    selectionDelete.disabled = n === 0;
+    if (selectionGroup) selectionGroup.disabled = n === 0;
+  }
+  function setSelectMode(on) {
+    selectMode = on;
+    document.body.classList.toggle("selecting", on);
+    if (!on) selected.clear();
+    selectBtn.classList.toggle("active", on);
+    selectBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    render();
+    updateSelectionBar();
+  }
+  /** Prune keys that no longer match (filter changed / session vanished). */
+  function pruneSelection() {
+    if (!selectMode || selected.size === 0) return;
+    const visible = new Set(visibleSelectable().map(sessionKey));
+    for (const k of [...selected]) if (!visible.has(k)) selected.delete(k);
+  }
+
   // ── Toolbar wiring ───────────────────────────────────────────────────────
   const filterInput = /** @type {HTMLInputElement} */ (
     document.getElementById("filter")
   );
+  const selectBtn = document.getElementById("action-select");
+  const selectionBar = document.getElementById("selection-bar");
+  const selectionCount = document.getElementById("selection-count");
+  const selectionOpen = document.getElementById("selection-open");
+  const selectionGroup = document.getElementById("selection-group");
+  const selectionDelete = document.getElementById("selection-delete");
+  const selectionCancel = document.getElementById("selection-cancel");
+  const selectionAll = document.getElementById("selection-all");
+
+  selectBtn.addEventListener("click", () => setSelectMode(!selectMode));
+  selectionCancel.addEventListener("click", () => setSelectMode(false));
+  selectionAll.addEventListener("click", () => {
+    const all = visibleSelectable().map(sessionKey);
+    // Toggle: if everything visible is already ticked, clear; else select all.
+    const allTicked = all.length > 0 && all.every((k) => selected.has(k));
+    selected.clear();
+    if (!allTicked) for (const k of all) selected.add(k);
+    render();
+    updateSelectionBar();
+  });
+  const keysToPayload = () =>
+    [...selected].map((k) => {
+      const i = k.indexOf(":");
+      return { provider: k.slice(0, i), id: k.slice(i + 1) };
+    });
+  selectionOpen.addEventListener("click", () => {
+    if (selected.size === 0) return;
+    post("openMany", { items: keysToPayload() });
+    setSelectMode(false);
+  });
+  selectionGroup.addEventListener("click", () => {
+    if (selected.size === 0) return;
+    // The extension shows the group picker and exits select mode afterwards.
+    post("assignGroup", { items: keysToPayload() });
+  });
+  selectionDelete.addEventListener("click", () => {
+    if (selected.size === 0) return;
+    // The extension shows the confirm modal; it calls back to exit on success.
+    post("deleteMany", { items: keysToPayload() });
+  });
   const clearBtn = document.getElementById("clear-filter");
   const activeBtn = document.getElementById("qf-active");
   const tagsBtn = document.getElementById("qf-tags");
@@ -1567,6 +1889,9 @@ try {
     .getElementById("action-refresh")
     .addEventListener("click", () => post("refresh"));
   document
+    .getElementById("action-more")
+    .addEventListener("click", () => post("actionsMenu"));
+  document
     .getElementById("action-import")
     .addEventListener("click", () => post("import"));
   document
@@ -1592,6 +1917,9 @@ try {
         showStats: !!ui.showStats,
       });
       render();
+    } else if (msg.type === "exitSelect") {
+      // The extension finished a multi-delete; drop out of select mode.
+      if (selectMode) setSelectMode(false);
     } else if (msg.type === "searchResults") {
       // Search and stats are mutually-exclusive top views.
       if (ui.showStats) {
