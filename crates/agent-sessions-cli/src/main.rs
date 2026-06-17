@@ -673,6 +673,46 @@ fn archive_dir() -> PathBuf {
     home_dir().join(".config/aterm/archive")
 }
 
+/// Pro-licence file written by the VS Code extension whenever the licence/trial
+/// state changes: `{ "pro": bool, "expiresAt": <ms since epoch> }`. The MCP
+/// server reads it to gate its tools behind Pro. (The `serve` binary is OSS, so
+/// this is a courtesy gate, not tamper-proof — the source can be recompiled.)
+fn pro_license_path() -> PathBuf {
+    home_dir().join(".config/aterm/pro-license.json")
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// True only when the extension has recorded a valid Pro state (licence or
+/// active trial) that has not yet expired. Absent/invalid/expired → fail closed.
+fn pro_active() -> bool {
+    let raw = match std::fs::read_to_string(pro_license_path()) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if json.get("pro").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+    // `expiresAt` bounds how long we trust the file without a refresh from the
+    // extension; missing → treat as expired.
+    match json.get("expiresAt").and_then(|v| v.as_i64()) {
+        Some(expires) => now_ms() < expires,
+        None => false,
+    }
+}
+
+const PRO_REQUIRED_MSG: &str = "Las tools MCP de Agent Sessions requieren la edición Pro. \
+Actívala en la extensión de VS Code (Agent Sessions: Activar licencia Pro…) o durante la prueba de 14 días.";
+
 fn emit(value: &serde_json::Value) {
     println!("{}", serde_json::to_string(value).unwrap_or_else(|_| "null".into()));
 }
@@ -1189,6 +1229,10 @@ fn mcp_initialize() -> serde_json::Value {
 }
 
 fn tools_list() -> serde_json::Value {
+    // Pro gate: without a valid licence/trial the server advertises no tools.
+    if !pro_active() {
+        return serde_json::json!({ "tools": [] });
+    }
     serde_json::json!({
         "tools": [
             {
@@ -1233,6 +1277,16 @@ fn tools_list() -> serde_json::Value {
 }
 
 fn handle_tool_call(id: Option<serde_json::Value>, params: &serde_json::Value) -> serde_json::Value {
+    // Pro gate: even if a client cached the tool list, calls fail without Pro.
+    if !pro_active() {
+        return rpc_ok(
+            id,
+            serde_json::json!({
+                "content": [{ "type": "text", "text": PRO_REQUIRED_MSG }],
+                "isError": true
+            }),
+        );
+    }
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let args = params
         .get("arguments")
