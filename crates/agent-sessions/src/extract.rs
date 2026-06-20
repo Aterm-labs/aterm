@@ -47,6 +47,34 @@ pub fn preview_turns(path: &Path, extract: TurnExtractor) -> Vec<PreviewTurn> {
     turns
 }
 
+/// Cap for full-transcript extraction: scan the whole log but bound it so a
+/// pathological session can't blow up memory. Generous vs the preview caps.
+pub const TRANSCRIPT_MAX_LINES: usize = 200_000;
+/// Per-turn character cap for transcripts (high; only trims absurd single blobs).
+pub const TRANSCRIPT_TEXT_LIMIT: usize = 50_000;
+
+/// The full conversation as ordered (role, text) turns — no tail/turn limits,
+/// unlike `preview_turns`. For export and cross-provider hand-off. Reads the
+/// whole file (bounded by `TRANSCRIPT_MAX_LINES`); a single sequential pass.
+pub fn transcript_turns(path: &Path, extract: TurnExtractor) -> Vec<PreviewTurn> {
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    let reader = BufReader::new(file);
+    reader
+        .lines()
+        .take(TRANSCRIPT_MAX_LINES)
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .filter_map(|event| extract(&event))
+        .map(|(role, text)| PreviewTurn {
+            role: role.to_string(),
+            text: cap_text(&strip_command_wrappers(&text), TRANSCRIPT_TEXT_LIMIT),
+        })
+        .filter(|t| !t.text.is_empty())
+        .collect()
+}
+
 /// Concatenated conversation text for the FTS index, capped by lines/chars.
 pub fn fts_text(path: &Path, extract: TurnExtractor) -> Option<String> {
     let file = File::open(path).ok()?;

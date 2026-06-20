@@ -36,6 +36,12 @@ pub trait AgentProvider: Send + Sync {
     fn preview(&self, _session_id: &str) -> Result<Vec<PreviewTurn>, String> {
         Err("unsupported".to_string())
     }
+    /// The full conversation (no preview caps) for export / cross-provider
+    /// hand-off. Err("unsupported") for providers whose content isn't readable
+    /// from disk (opencode).
+    fn transcript(&self, _session_id: &str) -> Result<Vec<PreviewTurn>, String> {
+        Err("unsupported".to_string())
+    }
     /// Concatenated user+assistant text for the FTS index, capped. None when
     /// unsupported or the session can't be found.
     fn fts_content(&self, _session_id: &str) -> Option<String> {

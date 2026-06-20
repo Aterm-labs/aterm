@@ -53,6 +53,7 @@ fn main() {
         "scan" => scan(),
         "providers" => providers(),
         "preview" => preview(args.get(1), args.get(2)),
+        "transcript" => transcript(args.get(1), args.get(2)),
         "resume-argv" => argv_cmd(args.get(1), args.get(2), false),
         "new-argv" => argv_cmd(args.get(1), None, true),
         "compact-argv" => compact_argv_cmd(args.get(1), args.get(2)),
@@ -80,7 +81,7 @@ fn main() {
         "templates-delete" => templates_delete(args.get(1)),
         other => fail(&format!(
             "comando desconocido: {other:?}\nuso: agent-sessions-cli \
-             <scan|providers|preview|resume-argv|new-argv|compact-argv|metadata-get|\
+             <scan|providers|preview|transcript|resume-argv|new-argv|compact-argv|metadata-get|\
              metadata-set|metadata-clear|projects-get|projects-set|projects-clear|\
              export|import|archive|unarchive|archive-restore|delete|move|serve|\
              backup|restore|service-status|live|search-content|templates-get|\
@@ -148,6 +149,19 @@ fn preview(provider: Option<&String>, id: Option<&String>) {
     match p.preview(id) {
         Ok(turns) => emit(&serde_json::json!(turns)),
         Err(e) => fail(&format!("preview no disponible: {e}")),
+    }
+}
+
+/// Full conversation (no preview caps) as `[{role, text}]` — for export and
+/// cross-provider hand-off. Unsupported for opencode (content not on disk).
+fn transcript(provider: Option<&String>, id: Option<&String>) {
+    let (p, id) = match (find(provider), id) {
+        (Some(p), Some(id)) => (p, id),
+        _ => fail("uso: transcript <provider> <session-id>"),
+    };
+    match p.transcript(id) {
+        Ok(turns) => emit(&serde_json::json!(turns)),
+        Err(e) => fail(&format!("transcript no disponible: {e}")),
     }
 }
 

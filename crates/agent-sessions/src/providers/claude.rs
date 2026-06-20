@@ -165,6 +165,13 @@ impl AgentProvider for ClaudeProvider {
         Ok(extract::preview_turns(&path, claude_turn))
     }
 
+    fn transcript(&self, session_id: &str) -> Result<Vec<PreviewTurn>, String> {
+        let path = self
+            .locate(session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        Ok(extract::transcript_turns(&path, claude_turn))
+    }
+
     fn fts_content(&self, session_id: &str) -> Option<String> {
         let path = self.locate(session_id)?;
         extract::fts_text(&path, claude_turn)
