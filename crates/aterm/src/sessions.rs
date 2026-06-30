@@ -471,8 +471,11 @@ impl SessionPanel {
             }
         });
 
-        // Search as a rounded pill with a leading icon (frameless inner edit).
+        // Search as a rounded pill: icon · frameless edit · content-search
+        // toggle · clear. Content (FTS) search is folded into the same control.
         let spal = crate::theme::pal();
+        let searching = self.fts_rx.is_some();
+        let mut start_fts = false;
         egui::Frame::none()
             .fill(spal.surface0)
             .rounding(crate::theme::RADIUS)
@@ -481,42 +484,45 @@ impl SessionPanel {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("🔍").color(spal.overlay));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter)
-                            .hint_text("filtrar sesiones…")
-                            .frame(false)
-                            .desired_width(f32::INFINITY),
-                    );
-                    if !self.filter.is_empty() && ui.small_button("✕").clicked() {
-                        self.filter.clear();
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !self.filter.is_empty() && ui.small_button("✕").clicked() {
+                            self.filter.clear();
+                        }
+                        if ui
+                            .add_enabled(!searching, egui::Button::new("⌕").frame(false))
+                            .on_hover_text("Buscar también dentro de las conversaciones")
+                            .clicked()
+                        {
+                            start_fts = true;
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .hint_text("filtrar sesiones…")
+                                .frame(false)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
                 });
             });
-        ui.horizontal(|ui| {
-            let searching = self.fts_rx.is_some();
-            if ui
-                .add_enabled(!searching, egui::Button::new("⌕ en contenido"))
-                .on_hover_text("Buscar el texto también dentro de las conversaciones")
-                .clicked()
-            {
-                self.start_fts(ui.ctx());
-            }
-            if searching {
+        if start_fts {
+            self.start_fts(ui.ctx());
+        }
+        if searching {
+            ui.horizontal(|ui| {
                 ui.spinner();
-            } else if self.fts_query.is_some() {
-                ui.colored_label(
-                    c_teal(),
-                    format!("{} coincidencias en contenido", self.fts_matches.len()),
+                crate::theme::muted(ui, "buscando en el contenido…");
+            });
+        } else if self.fts_query.is_some() {
+            ui.horizontal(|ui| {
+                crate::theme::muted(
+                    ui,
+                    &format!("{} coincidencias en contenido", self.fts_matches.len()),
                 );
-                if ui
-                    .small_button("✕")
-                    .on_hover_text("Quitar búsqueda de contenido")
-                    .clicked()
-                {
+                if ui.small_button("✕").on_hover_text("Quitar").clicked() {
                     self.clear_fts();
                 }
-            }
-        });
+            });
+        }
 
         // Group mode as a connected segmented control.
         egui::Frame::none()
@@ -540,50 +546,76 @@ impl SessionPanel {
                 });
             });
 
+        // Filters + actions: active toggle · tag dropdown · (right) new + ⋯ menu.
+        let filter_tags = self.metadata.all_tags();
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.only_active, "● Solo activas");
             if ui
-                .button("📋 Plantillas")
-                .on_hover_text("Guardar / lanzar plantillas de sesión")
+                .selectable_label(self.only_active, "● Activas")
+                .on_hover_text("Mostrar solo sesiones activas")
                 .clicked()
             {
-                self.templates_open = true;
+                self.only_active = !self.only_active;
             }
-            if ui
-                .selectable_label(self.select_mode, "☑ Selección")
-                .on_hover_text("Selección múltiple para abrir/eliminar en lote")
-                .clicked()
-            {
-                self.select_mode = !self.select_mode;
-                if !self.select_mode {
-                    self.selected.clear();
-                }
-            }
-            if ui
-                .button("✨")
-                .on_hover_text("Lanzar el agente recomendado (el más usado disponible)")
-                .clicked()
-            {
-                if let Some(argv) = self.recommended_argv() {
-                    action = Some(PanelAction::Open {
-                        argv,
-                        cwd: None,
-                        key: None,
+            if !filter_tags.is_empty() {
+                let cur = self
+                    .tag_filter
+                    .as_deref()
+                    .map(|t| format!("#{t}"))
+                    .unwrap_or_else(|| "🏷 Etiqueta".to_string());
+                egui::ComboBox::from_id_salt("tagfilter")
+                    .selected_text(cur)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.tag_filter, None, "Todas");
+                        for t in &filter_tags {
+                            ui.selectable_value(
+                                &mut self.tag_filter,
+                                Some(t.clone()),
+                                format!("#{t}"),
+                            );
+                        }
                     });
-                }
             }
-            if ui
-                .button("Multi…")
-                .on_hover_text("Nueva sesión en varios proyectos")
-                .clicked()
-            {
-                self.multi_open = true;
-                if self.multi_provider.is_empty() {
-                    if let Some(p) = all_providers().iter().find(|p| p.detect()) {
-                        self.multi_provider = p.id().to_string();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("⋯", |ui| {
+                    if ui.button("📋 Plantillas…").clicked() {
+                        self.templates_open = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .selectable_label(self.select_mode, "☑ Selección múltiple")
+                        .clicked()
+                    {
+                        self.select_mode = !self.select_mode;
+                        if !self.select_mode {
+                            self.selected.clear();
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("⊞ Nueva en varios proyectos…").clicked() {
+                        self.multi_open = true;
+                        if self.multi_provider.is_empty() {
+                            if let Some(p) = all_providers().iter().find(|p| p.detect()) {
+                                self.multi_provider = p.id().to_string();
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                })
+                .response
+                .on_hover_text("Más acciones");
+                if crate::theme::primary_button(ui, "✨ Nueva")
+                    .on_hover_text("Lanzar el agente recomendado")
+                    .clicked()
+                {
+                    if let Some(argv) = self.recommended_argv() {
+                        action = Some(PanelAction::Open {
+                            argv,
+                            cwd: None,
+                            key: None,
+                        });
                     }
                 }
-            }
+            });
         });
 
         // Batch-action bar (multiselection) + delete-by-date entry point.
@@ -616,25 +648,8 @@ impl SessionPanel {
             });
         }
 
-        // Tag "folders": a row of chips that filter to one tag at a time.
-        let tags = self.metadata.all_tags();
-        if !tags.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Carpetas:");
-                if ui
-                    .selectable_label(self.tag_filter.is_none(), "Todas")
-                    .clicked()
-                {
-                    self.tag_filter = None;
-                }
-                for tag in &tags {
-                    let active = self.tag_filter.as_deref() == Some(tag.as_str());
-                    if ui.selectable_label(active, format!("#{tag}")).clicked() {
-                        self.tag_filter = if active { None } else { Some(tag.clone()) };
-                    }
-                }
-            });
-        }
+        ui.add_space(2.0);
+        ui.separator();
 
         // Owned snapshots so the mutable import widgets below don't clash with
         // borrows of `self.groups` / `self.projects`. Reused by the scroll area.
