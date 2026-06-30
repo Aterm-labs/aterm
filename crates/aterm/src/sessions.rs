@@ -106,13 +106,15 @@ struct ProviderGroup {
     error: Option<String>,
 }
 
-/// In-flight rename/tags/colour edit for one `(provider, id)`.
+/// In-flight rename/tags/colour/notes/favourite edit for one `(provider, id)`.
 struct EditState {
     provider: String,
     id: String,
     name: String,
     tags: String,
     color: String,
+    notes: String,
+    favorite: bool,
 }
 
 /// Loaded conversation preview for the inspector window.
@@ -584,9 +586,16 @@ impl SessionPanel {
                 GroupMode::Provider => {
                     for (gi, group) in groups.iter().enumerate() {
                         let provider_id = group.provider.id();
-                        let visible: Vec<usize> = (0..group.sessions.len())
+                        let mut visible: Vec<usize> = (0..group.sessions.len())
                             .filter(|si| passes(gi, *si))
                             .collect();
+                        // Favourites pinned to the top (stable: keeps the
+                        // last-activity order within each band).
+                        visible.sort_by_key(|si| {
+                            !metadata
+                                .get(provider_id, &group.sessions[*si].id)
+                                .is_some_and(|m| m.favorite)
+                        });
                         let counts = count_states(visible.iter().map(|si| &group.sessions[*si]));
                         let title = match &group.error {
                             Some(err) => {
@@ -693,9 +702,16 @@ impl SessionPanel {
                 GroupMode::Cascade => {
                     for (gi, group) in groups.iter().enumerate() {
                         let provider_id = group.provider.id();
-                        let visible: Vec<usize> = (0..group.sessions.len())
+                        let mut visible: Vec<usize> = (0..group.sessions.len())
                             .filter(|si| passes(gi, *si))
                             .collect();
+                        // Favourites pinned to the top (stable: keeps the
+                        // last-activity order within each band).
+                        visible.sort_by_key(|si| {
+                            !metadata
+                                .get(provider_id, &group.sessions[*si].id)
+                                .is_some_and(|m| m.favorite)
+                        });
                         let counts = count_states(visible.iter().map(|si| &group.sessions[*si]));
                         let title = match &group.error {
                             Some(err) => {
@@ -842,6 +858,8 @@ impl SessionPanel {
             name: meta.name.unwrap_or_default(),
             tags: meta.tags.join(", "),
             color: meta.color.unwrap_or_default(),
+            notes: meta.notes.unwrap_or_default(),
+            favorite: meta.favorite,
         });
     }
 
@@ -958,6 +976,17 @@ impl SessionPanel {
                     ui.label("Color");
                     ui.text_edit_singleline(&mut edit.color);
                     ui.end_row();
+                    ui.label("Notas");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut edit.notes)
+                            .desired_rows(3)
+                            .desired_width(260.0)
+                            .hint_text("Notas libres sobre la sesión"),
+                    );
+                    ui.end_row();
+                    ui.label("Favorito");
+                    ui.checkbox(&mut edit.favorite, "Fijar arriba (★)");
+                    ui.end_row();
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Guardar").clicked() {
@@ -974,10 +1003,14 @@ impl SessionPanel {
             let name = edit.name.trim().to_string();
             let tags = parse_tags(&edit.tags);
             let color = edit.color.trim().to_string();
+            let notes = edit.notes.trim().to_string();
+            let favorite = edit.favorite;
             self.metadata.update(&provider, &id, |m| {
                 m.name = (!name.is_empty()).then(|| name.clone());
                 m.tags = tags.clone();
                 m.color = (!color.is_empty()).then(|| color.clone());
+                m.notes = (!notes.is_empty()).then(|| notes.clone());
+                m.favorite = favorite;
             });
             self.save_metadata();
             self.edit = None;
@@ -1239,6 +1272,10 @@ fn row_ui(
                 if show_provider {
                     ui.colored_label(provider_color(provider_id), format!("[{provider_id}]"));
                 }
+                if meta.is_some_and(|m| m.favorite) {
+                    ui.colored_label(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), "★")
+                        .on_hover_text("Favorito");
+                }
                 ui.label(egui::RichText::new(&name).strong());
             });
 
@@ -1283,6 +1320,9 @@ fn row_ui(
                             ui.colored_label(c_teal(), format!("#{tag}"));
                         }
                     });
+                }
+                if let Some(notes) = &m.notes {
+                    ui.weak("🗒 notas").on_hover_text(notes);
                 }
             }
 
