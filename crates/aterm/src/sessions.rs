@@ -122,6 +122,7 @@ struct EditState {
     color: String,
     notes: String,
     favorite: bool,
+    icon: String,
 }
 
 /// Loaded conversation preview for the inspector window.
@@ -193,6 +194,8 @@ pub struct SessionPanel {
     template_form: Option<TemplateForm>,
     /// Draft path for restoring a catalog backup `.zip`.
     backup_path: String,
+    /// Draft emoji for the project being edited in the project window.
+    project_icon_draft: String,
 }
 
 /// Draft fields for the "save a launch template" form.
@@ -241,6 +244,7 @@ impl Default for SessionPanel {
             templates_open: false,
             template_form: None,
             backup_path: String::new(),
+            project_icon_draft: String::new(),
         }
     }
 }
@@ -929,6 +933,7 @@ impl SessionPanel {
         }
         if let Some(path) = to_rename_project {
             let draft = self.projects.get(&path).unwrap_or("").to_string();
+            self.project_icon_draft = crate::icons::project(&path).unwrap_or_default();
             self.project_edit = Some((path, draft));
         }
         self.new_session_path = new_session_path;
@@ -955,6 +960,7 @@ impl SessionPanel {
             color: meta.color.unwrap_or_default(),
             notes: meta.notes.unwrap_or_default(),
             favorite: meta.favorite,
+            icon: crate::icons::session(&format!("{provider}:{id}")).unwrap_or_default(),
         });
     }
 
@@ -1104,6 +1110,13 @@ impl SessionPanel {
                     ui.label("Favorito");
                     ui.checkbox(&mut edit.favorite, "Fijar arriba (★)");
                     ui.end_row();
+                    ui.label("Icono");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut edit.icon)
+                            .hint_text("emoji, p. ej. 🚀")
+                            .desired_width(80.0),
+                    );
+                    ui.end_row();
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Guardar").clicked() {
@@ -1122,6 +1135,7 @@ impl SessionPanel {
             let color = edit.color.trim().to_string();
             let notes = edit.notes.trim().to_string();
             let favorite = edit.favorite;
+            let icon = edit.icon.clone();
             self.metadata.update(&provider, &id, |m| {
                 m.name = (!name.is_empty()).then(|| name.clone());
                 m.tags = tags.clone();
@@ -1129,6 +1143,7 @@ impl SessionPanel {
                 m.notes = (!notes.is_empty()).then(|| notes.clone());
                 m.favorite = favorite;
             });
+            crate::icons::set_session(&format!("{provider}:{id}"), &icon);
             self.save_metadata();
             self.edit = None;
         } else if cancel || !open {
@@ -1293,9 +1308,12 @@ impl SessionPanel {
     }
 
     fn project_window(&mut self, ctx: &egui::Context) {
-        let Some((path, draft)) = self.project_edit.as_mut() else {
+        if self.project_edit.is_none() {
             return;
-        };
+        }
+        // Edit the icon out-of-band (disjoint from `project_edit`).
+        let mut icon_draft = std::mem::take(&mut self.project_icon_draft);
+        let (path, draft) = self.project_edit.as_mut().unwrap();
         let path_label = display_path(path);
         let mut open = true;
         let mut save = false;
@@ -1309,6 +1327,12 @@ impl SessionPanel {
                 ui.weak(path_label);
                 ui.label("Nombre:");
                 ui.text_edit_singleline(draft);
+                ui.label("Icono:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut icon_draft)
+                        .hint_text("emoji, p. ej. 📁")
+                        .desired_width(80.0),
+                );
                 ui.separator();
                 ui.label("Color:");
                 ui.horizontal_wrapped(|ui| {
@@ -1351,6 +1375,9 @@ impl SessionPanel {
                 });
             });
 
+        // Keep the icon draft for next frame.
+        self.project_icon_draft = icon_draft.clone();
+
         // Colour swatches apply immediately (the window stays open).
         if let Some(hex) = set_color {
             if let Some(p) = self.project_edit.as_ref().map(|(p, _)| p.clone()) {
@@ -1361,12 +1388,15 @@ impl SessionPanel {
         if save {
             if let Some((path, draft)) = self.project_edit.take() {
                 self.projects.set(&path, draft);
+                crate::icons::set_project(&path, &icon_draft);
                 if let Err(e) = self.projects.save(&self.projects_path) {
                     self.status = Some(format!("No se pudieron guardar los nombres: {e}"));
                 }
             }
+            self.project_icon_draft.clear();
         } else if cancel || !open {
             self.project_edit = None;
+            self.project_icon_draft.clear();
         }
     }
 
@@ -1548,6 +1578,9 @@ fn row_ui(
                 if meta.is_some_and(|m| m.favorite) {
                     ui.colored_label(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), "★")
                         .on_hover_text("Favorito");
+                }
+                if let Some(icon) = crate::icons::session(&format!("{provider_id}:{}", s.id)) {
+                    ui.label(icon);
                 }
                 ui.label(egui::RichText::new(&name).strong());
             });
@@ -1825,14 +1858,18 @@ fn project_key(s: &AgentSession) -> String {
 /// Sentinel project key for sessions whose provider didn't record a cwd.
 const NO_PROJECT: &str = "(sin proyecto)";
 
-/// Header for a project bucket: alias if set, else the path, in teal.
+/// Header for a project bucket: optional emoji + alias if set, else the path,
+/// in teal.
 fn project_header(projects: &ProjectNames, path: &str, count: usize) -> egui::RichText {
     let label = projects
         .get(path)
         .map(str::to_string)
         .unwrap_or_else(|| display_path(path));
     let color = projects.color(path).unwrap_or_else(c_teal);
-    egui::RichText::new(format!("{label} ({count})"))
+    let icon = crate::icons::project(path)
+        .map(|e| format!("{e} "))
+        .unwrap_or_default();
+    egui::RichText::new(format!("{icon}{label} ({count})"))
         .color(color)
         .strong()
 }

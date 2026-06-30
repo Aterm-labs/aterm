@@ -10,6 +10,7 @@
 
 mod app;
 mod backup;
+mod icons;
 mod license;
 mod persist;
 mod pro;
