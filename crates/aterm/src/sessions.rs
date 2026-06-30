@@ -703,7 +703,7 @@ impl SessionPanel {
         egui::CollapsingHeader::new("Backup del catálogo")
             .id_salt("backup")
             .show(ui, |ui| {
-                ui.weak("Metadata + proyectos + plantillas en un .zip.");
+                crate::theme::muted(ui, "Metadata + proyectos + plantillas en un .zip.");
                 if ui
                     .button("⤓ Crear backup")
                     .on_hover_text("Guarda un snapshot en tu carpeta personal")
@@ -1071,7 +1071,10 @@ impl SessionPanel {
                         }
                     });
                     if group_store.groups.is_empty() {
-                        ui.weak("Crea una colección y asígnale sesiones desde ✏ en cada sesión.");
+                        crate::theme::muted(
+                            ui,
+                            "Crea una colección y asígnale sesiones desde ✏ en cada sesión.",
+                        );
                     }
                     for (i, g) in group_store.groups.iter().enumerate() {
                         let members: Vec<(usize, usize)> = g
@@ -1689,7 +1692,7 @@ impl SessionPanel {
             .default_size([420.0, 360.0])
             .show(ctx, |ui| {
                 if self.templates.templates.is_empty() {
-                    ui.weak("Sin plantillas todavía. Crea una abajo.");
+                    crate::theme::muted(ui, "Sin plantillas todavía. Crea una abajo.");
                 }
                 for t in &self.templates.templates {
                     ui.horizontal(|ui| {

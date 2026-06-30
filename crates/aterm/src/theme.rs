@@ -345,6 +345,26 @@ fn theme_path() -> std::path::PathBuf {
     home.join(".config/aterm/theme")
 }
 
+/// Shared visual tokens (kept in one place so the look is consistent).
+pub const RADIUS: f32 = 8.0;
+pub const GAP: f32 = 8.0;
+
+/// An accent-coloured section heading for dialogs/panels.
+pub fn heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .color(pal().lavender)
+            .strong()
+            .size(13.0),
+    );
+    ui.add_space(2.0);
+}
+
+/// Muted helper/caption text.
+pub fn muted(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).color(pal().overlay).small());
+}
+
 /// Build egui's `Style`/`Visuals` from the active palette.
 pub fn apply(ctx: &egui::Context) {
     use egui::{Rounding, Stroke};
@@ -357,7 +377,7 @@ pub fn apply(ctx: &egui::Context) {
     } else {
         egui::Visuals::dark()
     };
-    let rounding = Rounding::same(6.0);
+    let rounding = Rounding::same(RADIUS);
     v.panel_fill = p.base;
     v.window_fill = p.mantle;
     v.window_stroke = Stroke::new(1.0, p.surface1);
@@ -373,6 +393,18 @@ pub fn apply(ctx: &egui::Context) {
     v.error_fg_color = p.red;
     v.selection.bg_fill = p.surface2.gamma_multiply(0.9);
     v.selection.stroke = Stroke::new(1.0, p.lavender);
+    // Soft shadows give windows/popups depth without harsh edges.
+    let shadow = egui::epaint::Shadow {
+        offset: egui::vec2(0.0, 3.0),
+        blur: 16.0,
+        spread: 0.0,
+        color: Color32::from_black_alpha(if lum > 128.0 { 40 } else { 96 }),
+    };
+    v.window_shadow = shadow;
+    v.popup_shadow = egui::epaint::Shadow {
+        blur: 10.0,
+        ..shadow
+    };
 
     let set = |w: &mut egui::style::WidgetVisuals, fill, stroke_c, fg| {
         w.bg_fill = fill;
@@ -389,8 +421,10 @@ pub fn apply(ctx: &egui::Context) {
 
     let mut style = (*ctx.style()).clone();
     style.visuals = v;
-    style.spacing.item_spacing = egui::vec2(8.0, 7.0);
-    style.spacing.button_padding = egui::vec2(8.0, 5.0);
+    style.spacing.item_spacing = egui::vec2(GAP, 7.0);
+    style.spacing.button_padding = egui::vec2(9.0, 5.0);
+    style.spacing.window_margin = egui::Margin::same(11.0);
+    style.spacing.menu_margin = egui::Margin::same(7.0);
     style.spacing.indent = 14.0;
     style.spacing.scroll = egui::style::ScrollStyle::thin();
     use egui::{FontFamily::Proportional, FontId, TextStyle};

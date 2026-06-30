@@ -1415,7 +1415,6 @@ impl AtermApp {
         let mut s = initial.clone();
         let mut reapply_theme = false;
 
-        let accent = crate::theme::pal().lavender;
         let cat = &mut self.settings_cat;
         egui::Window::new("Ajustes")
             .open(&mut open)
@@ -1451,13 +1450,8 @@ impl AtermApp {
                         ui.set_width(370.0);
                         match *cat {
                             SettingsCat::Appearance => {
-                                ui.label(
-                                    egui::RichText::new("APARIENCIA")
-                                        .color(accent)
-                                        .strong()
-                                        .size(13.0),
-                                );
-                                ui.add_space(8.0);
+                                crate::theme::heading(ui, "APARIENCIA");
+                                ui.add_space(6.0);
                                 ui.horizontal(|ui| {
                                     label_w(ui, "Tema");
                                     let current = crate::theme::current_name();
@@ -1498,13 +1492,8 @@ impl AtermApp {
                                 );
                             }
                             SettingsCat::Terminal => {
-                                ui.label(
-                                    egui::RichText::new("TERMINAL")
-                                        .color(accent)
-                                        .strong()
-                                        .size(13.0),
-                                );
-                                ui.add_space(8.0);
+                                crate::theme::heading(ui, "TERMINAL");
+                                ui.add_space(6.0);
                                 ui.checkbox(
                                     &mut s.auto_close_on_exit,
                                     "Cerrar la pestaña al salir (exit)",
@@ -1529,13 +1518,8 @@ impl AtermApp {
                                 });
                             }
                             SettingsCat::Panel => {
-                                ui.label(
-                                    egui::RichText::new("PANEL DE SESIONES")
-                                        .color(accent)
-                                        .strong()
-                                        .size(13.0),
-                                );
-                                ui.add_space(8.0);
+                                crate::theme::heading(ui, "PANEL DE SESIONES");
+                                ui.add_space(6.0);
                                 ui.label("Proveedores a escanear");
                                 ui.horizontal_wrapped(|ui| {
                                     ui.checkbox(&mut s.scan_claude, "Claude");
