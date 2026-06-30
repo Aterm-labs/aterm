@@ -191,6 +191,8 @@ pub struct AtermApp {
     palette_open: bool,
     /// Filter text in the action palette.
     palette_filter: String,
+    /// Tab ids already announced as "finished", so the toast fires once.
+    exited_seen: std::collections::HashSet<u64>,
 }
 
 impl Default for AtermApp {
@@ -231,6 +233,7 @@ impl Default for AtermApp {
             egui_ctx: egui::Context::default(),
             palette_open: false,
             palette_filter: String::new(),
+            exited_seen: std::collections::HashSet::new(),
         }
     }
 }
@@ -914,6 +917,29 @@ impl eframe::App for AtermApp {
         }) {
             self.request_close(self.focused);
         }
+
+        // Notify once when an agent/command finishes (idle/finish automation),
+        // before any auto-close removes the tab.
+        let finished: Vec<(u64, String, i32)> = self
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                t.term
+                    .exit_code()
+                    .filter(|_| !self.exited_seen.contains(&t.id))
+                    .map(|code| (t.id, t.name.clone().unwrap_or_else(|| t.term.title()), code))
+            })
+            .collect();
+        for (id, title, code) in finished {
+            self.exited_seen.insert(id);
+            aterm_pro_api::ProHost::notify(
+                self,
+                format!("Terminó «{}» (código {code})", truncate(&title, 28)),
+            );
+        }
+        // Forget ids of tabs that no longer exist (keeps the set bounded).
+        self.exited_seen
+            .retain(|id| self.tabs.iter().any(|t| t.id == *id));
 
         // Auto-close tabs whose child has exited (`exit` / Ctrl+D) — unless the
         // user prefers to keep the `[exited N]` placeholder.
