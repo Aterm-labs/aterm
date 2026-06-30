@@ -691,64 +691,113 @@ impl SessionPanel {
             v
         };
 
-        egui::CollapsingHeader::new("Importar sesiones")
+        egui::CollapsingHeader::new(egui::RichText::new("📥  Importar sesiones").strong())
             .id_salt("import")
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Archivo:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.import_path)
-                            .hint_text("ruta .zip")
-                            .desired_width(220.0),
-                    );
-                });
-                // Filesystem autocomplete: list matching dirs / .zip files.
+                let ipal = crate::theme::pal();
+                crate::theme::muted(ui, "Restaura un archivo .zip exportado (formato Claude).");
+                ui.add_space(6.0);
+
+                // File field as a rounded pill with a leading icon.
+                egui::Frame::none()
+                    .fill(ipal.surface0)
+                    .rounding(crate::theme::RADIUS)
+                    .stroke(egui::Stroke::new(1.0, ipal.surface1))
+                    .inner_margin(egui::Margin::symmetric(9.0, 5.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("📦").color(ipal.overlay));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if !self.import_path.is_empty()
+                                        && ui.small_button("✕").clicked()
+                                    {
+                                        self.import_path.clear();
+                                    }
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.import_path)
+                                            .hint_text("ruta del .zip a importar")
+                                            .frame(false)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                },
+                            );
+                        });
+                    });
+
+                // Filesystem autocomplete: matching dirs / .zip files.
                 let trimmed = self.import_path.trim().to_string();
                 if !trimmed.is_empty() && !std::path::Path::new(&trimmed).is_file() {
                     let candidates = path_candidates(&trimmed);
                     if !candidates.is_empty() {
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            for c in candidates {
-                                if ui.selectable_label(false, completion_label(&c)).clicked() {
-                                    self.import_path = c;
+                        egui::Frame::none()
+                            .fill(ipal.mantle)
+                            .rounding(crate::theme::RADIUS)
+                            .inner_margin(egui::Margin::same(4.0))
+                            .show(ui, |ui| {
+                                for c in candidates {
+                                    if ui.selectable_label(false, completion_label(&c)).clicked() {
+                                        self.import_path = c;
+                                    }
                                 }
-                            }
-                        });
+                            });
                     }
                 }
-                ui.horizontal(|ui| {
-                    ui.label("Proveedor:");
-                    egui::ComboBox::from_id_salt("imp-prov")
-                        .selected_text(self.import_provider.clone())
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &provider_list {
-                                ui.add_enabled_ui(id == "claude", |ui| {
+
+                ui.add_space(6.0);
+                egui::Grid::new("import-grid")
+                    .num_columns(2)
+                    .spacing([10.0, 7.0])
+                    .show(ui, |ui| {
+                        ui.label("Proveedor");
+                        egui::ComboBox::from_id_salt("imp-prov")
+                            .selected_text(self.import_provider.clone())
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &provider_list {
+                                    ui.add_enabled_ui(id == "claude", |ui| {
+                                        ui.selectable_value(
+                                            &mut self.import_provider,
+                                            id.clone(),
+                                            name,
+                                        )
+                                        .on_disabled_hover_text(
+                                            "Import solo soportado para Claude",
+                                        );
+                                    });
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Proyecto");
+                        let current = project_options
+                            .iter()
+                            .find(|(o, _)| *o == self.import_project)
+                            .map(|(_, l)| l.clone())
+                            .unwrap_or_else(|| "Auto (cwd original)".to_string());
+                        egui::ComboBox::from_id_salt("imp-proj")
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                for (opt, label) in &project_options {
                                     ui.selectable_value(
-                                        &mut self.import_provider,
-                                        id.clone(),
-                                        name,
-                                    )
-                                    .on_disabled_hover_text("Import solo soportado para Claude");
-                                });
-                            }
-                        });
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Proyecto:");
-                    let current = project_options
-                        .iter()
-                        .find(|(o, _)| *o == self.import_project)
-                        .map(|(_, l)| l.clone())
-                        .unwrap_or_else(|| "Auto (cwd original)".to_string());
-                    egui::ComboBox::from_id_salt("imp-proj")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (opt, label) in &project_options {
-                                ui.selectable_value(&mut self.import_project, opt.clone(), label);
-                            }
-                        });
-                });
-                if ui.button("Importar").clicked() {
+                                        &mut self.import_project,
+                                        opt.clone(),
+                                        label,
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                let ready = !self.import_path.trim().is_empty();
+                let btn = egui::Button::new(
+                    egui::RichText::new("📥  Importar")
+                        .color(ipal.crust)
+                        .strong(),
+                )
+                .fill(ipal.blue)
+                .rounding(crate::theme::RADIUS);
+                if ui.add_enabled(ready, btn).clicked() {
                     self.do_import();
                 }
             });
