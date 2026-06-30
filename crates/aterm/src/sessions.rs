@@ -699,6 +699,7 @@ impl SessionPanel {
                 ui.add_space(6.0);
 
                 // File field as a rounded pill with a leading icon.
+                let mut field_resp = None;
                 egui::Frame::none()
                     .fill(ipal.surface0)
                     .rounding(crate::theme::RADIUS)
@@ -715,34 +716,48 @@ impl SessionPanel {
                                     {
                                         self.import_path.clear();
                                     }
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.import_path)
-                                            .hint_text("ruta del .zip a importar")
-                                            .frame(false)
-                                            .desired_width(f32::INFINITY),
+                                    field_resp = Some(
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.import_path)
+                                                .hint_text("ruta del .zip a importar")
+                                                .frame(false)
+                                                .desired_width(f32::INFINITY),
+                                        ),
                                     );
                                 },
                             );
                         });
                     });
 
-                // Filesystem autocomplete: matching dirs / .zip files.
-                let trimmed = self.import_path.trim().to_string();
-                if !trimmed.is_empty() && !std::path::Path::new(&trimmed).is_file() {
-                    let candidates = path_candidates(&trimmed);
-                    if !candidates.is_empty() {
-                        egui::Frame::none()
-                            .fill(ipal.mantle)
-                            .rounding(crate::theme::RADIUS)
-                            .inner_margin(egui::Margin::same(4.0))
-                            .show(ui, |ui| {
-                                for c in candidates {
-                                    if ui.selectable_label(false, completion_label(&c)).clicked() {
-                                        self.import_path = c;
-                                    }
-                                }
-                            });
+                // Filesystem autocomplete as a FLOATING popup anchored under the
+                // field, so the suggestions don't push the form down.
+                if let Some(resp) = field_resp {
+                    let trimmed = self.import_path.trim().to_string();
+                    let candidates =
+                        if !trimmed.is_empty() && !std::path::Path::new(&trimmed).is_file() {
+                            path_candidates(&trimmed)
+                        } else {
+                            Vec::new()
+                        };
+                    let popup_id = ui.make_persistent_id("import-autocomplete");
+                    if resp.has_focus() && !candidates.is_empty() {
+                        ui.memory_mut(|m| m.open_popup(popup_id));
                     }
+                    egui::popup::popup_below_widget(
+                        ui,
+                        popup_id,
+                        &resp,
+                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                        |ui| {
+                            ui.set_min_width(resp.rect.width());
+                            for c in candidates {
+                                if ui.selectable_label(false, completion_label(&c)).clicked() {
+                                    self.import_path = c;
+                                    ui.memory_mut(|m| m.close_popup());
+                                }
+                            }
+                        },
+                    );
                 }
 
                 ui.add_space(6.0);
