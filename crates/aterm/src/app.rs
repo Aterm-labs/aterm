@@ -1213,12 +1213,25 @@ impl eframe::App for AtermApp {
                 }
             }
             if self.visible.is_empty() {
-                ui.heading("Terminal");
-                ui.separator();
-                ui.label(
-                    "Pulsa «>_» para abrir una shell, o «▶» en una sesión \
-                     del panel para reanudarla.",
-                );
+                let pal = crate::theme::pal();
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.32);
+                    ui.label(egui::RichText::new("aterm").size(34.0).color(pal.overlay));
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Pulsa «>_» para abrir una shell, o «▶» en una sesión \
+                             del panel para reanudarla.",
+                        )
+                        .color(pal.overlay),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Ctrl+Shift+P · paleta de acciones")
+                            .small()
+                            .color(pal.surface2),
+                    );
+                });
                 return;
             }
             if self.tab_index(self.focused).is_none() {
