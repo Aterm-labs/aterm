@@ -1702,7 +1702,7 @@ impl SessionPanel {
                         ui.label(egui::RichText::new(&t.name).strong());
                         ui.weak(format!("[{}]", t.provider));
                         for tag in &t.tags {
-                            ui.colored_label(c_teal(), format!("#{tag}"));
+                            tag_chip(ui, &format!("#{tag}"));
                         }
                     });
                 }
@@ -2125,8 +2125,18 @@ fn row_ui(
         .or_else(|| s.title.clone())
         .unwrap_or_else(|| "(sin título)".to_string());
 
+    // Accent border: green when live, yellow when favourited, none otherwise.
+    let pal = crate::theme::pal();
+    let stroke = if s.is_active {
+        egui::Stroke::new(1.0, pal.green)
+    } else if meta.is_some_and(|m| m.favorite) {
+        egui::Stroke::new(1.0, pal.yellow)
+    } else {
+        egui::Stroke::NONE
+    };
     egui::Frame::none()
         .fill(c_card())
+        .stroke(stroke)
         .rounding(8.0)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
@@ -2212,7 +2222,7 @@ fn row_ui(
                 if !m.tags.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         for tag in &m.tags {
-                            ui.colored_label(c_teal(), format!("#{tag}"));
+                            tag_chip(ui, &format!("#{tag}"));
                         }
                     });
                 }
@@ -2393,6 +2403,18 @@ fn c_lavender() -> egui::Color32 {
 }
 fn c_teal() -> egui::Color32 {
     crate::theme::pal().teal
+}
+
+/// A rounded "pill" chip on a surface background — used for tags.
+fn tag_chip(ui: &mut egui::Ui, text: &str) {
+    let pal = crate::theme::pal();
+    egui::Frame::none()
+        .fill(pal.surface1)
+        .rounding(7.0)
+        .inner_margin(egui::Margin::symmetric(6.0, 1.0))
+        .show(ui, |ui| {
+            ui.colored_label(pal.teal, text);
+        });
 }
 fn c_green() -> egui::Color32 {
     crate::theme::pal().green
