@@ -42,6 +42,10 @@ pub struct Settings {
     pub fetch_status: bool,
     /// How chatty the transient toasts are.
     pub notify_level: NotifyLevel,
+    /// Draw the faint HUD background grid over the terminal area.
+    pub hud_grid: bool,
+    /// Animate a scanline sweep over the terminal area (costs a repaint clock).
+    pub scanlines: bool,
 }
 
 impl Default for Settings {
@@ -59,6 +63,8 @@ impl Default for Settings {
             refresh_secs: 120,
             fetch_status: true,
             notify_level: NotifyLevel::All,
+            hud_grid: true,
+            scanlines: false,
         }
     }
 }

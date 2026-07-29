@@ -133,10 +133,23 @@ name = "agent-sessions-cli"
 version = "0.1.0"
 dependencies = [
  "agent-sessions",
+ "agent-sessions-remote",
  "dirs",
  "serde",
  "serde_json",
  "zip",
+]
+
+[[package]]
+name = "agent-sessions-remote"
+version = "0.1.0"
+dependencies = [
+ "agent-sessions",
+ "dirs",
+ "flate2",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -448,8 +461,6 @@ version = "0.1.0"
 dependencies = [
  "aterm-pro-api",
  "egui",
- "serde",
- "serde_json",
 ]
 
 [[package]]

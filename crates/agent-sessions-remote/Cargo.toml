@@ -1,0 +1,24 @@
+# Shared sessions: publish a session's on-disk artefacts to a repository other
+# people can read, and hydrate one of theirs back into the local provider
+# layout. Sits *on top* of `agent-sessions` (which stays a verbatim vendor copy
+# and read-only by design) so nothing here diverges from upstream.
+#
+# No heavy HTTP dependency on purpose: the API drivers shell out to `curl` the
+# same way `aterm`'s service_status does, and the git driver shells out to
+# `git`. Both are already required on any machine that uses these backends.
+[package]
+name = "agent-sessions-remote"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Publish and hydrate coding-agent sessions through a shared repository"
+
+[dependencies]
+agent-sessions = { path = "../agent-sessions" }
+dirs = "6"
+flate2 = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3.8.0"

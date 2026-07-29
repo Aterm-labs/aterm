@@ -14,8 +14,33 @@ use crate::term::{TermInstance, TermSize};
 /// without this the action-button icons show as missing/blank.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    // DejaVu Sans → broad Latin/arrows/geometric; Noto Symbols2 → dingbats,
-    // technical and misc-symbol blocks (✕ ✎ ⤓ ⟳ ⎇ …).
+
+    // Bundled brand faces (OFL) — give aterm the HUD look regardless of what the
+    // host has installed. JetBrains Mono drives the terminal grid *and* the UI
+    // body (the whole "Nexus" aesthetic is monospaced); Chakra Petch is the
+    // display face for the logo, section headings and status bar.
+    fonts.font_data.insert(
+        "jbm".to_owned(),
+        egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/JetBrainsMono-Regular.ttf"
+        )),
+    );
+    fonts.font_data.insert(
+        "jbm-bold".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf")),
+    );
+    fonts.font_data.insert(
+        "chakra".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/ChakraPetch-Regular.ttf")),
+    );
+    fonts.font_data.insert(
+        "chakra-sb".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/ChakraPetch-SemiBold.ttf")),
+    );
+
+    // System faces used purely as glyph fallbacks: DejaVu Sans → broad
+    // Latin/arrows/geometric; Noto Symbols2 → dingbats and misc-symbol blocks
+    // (✕ ✎ ⬡ ◈ ⌗ ↺ ❯ …) that JetBrains Mono / Chakra Petch don't cover.
     let candidates = [
         (
             "sys-dejavu",
@@ -30,34 +55,49 @@ pub fn install_fonts(ctx: &egui::Context) {
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         ),
     ];
-    let mut loaded = Vec::new();
+    let mut sys = Vec::new();
     for (name, path) in candidates {
         if let Ok(bytes) = std::fs::read(path) {
             fonts
                 .font_data
                 .insert(name.to_owned(), egui::FontData::from_owned(bytes));
-            loaded.push(name.to_owned());
+            sys.push(name.to_owned());
         }
     }
-    if loaded.is_empty() {
-        return;
+
+    // Proportional (UI body): JetBrains Mono first, symbol/latin system faces as
+    // fallbacks, then egui's built-ins.
+    {
+        let list = fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default();
+        for name in sys.iter().rev() {
+            list.insert(0, name.clone());
+        }
+        list.insert(0, "jbm".to_owned());
     }
-    // The UI (proportional) family: make Noto Sans the primary when available
-    // (more legible than egui's default Ubuntu-Light), with the rest as
-    // fallbacks. Monospace is left untouched so the terminal grid stays aligned.
-    let list = fonts
+
+    // Monospace (terminal grid): JetBrains Mono first, keep symbol fallback so
+    // box-drawing/dingbats still resolve.
+    {
+        let list = fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default();
+        if let Some(p) = sys.iter().position(|n| n == "sys-noto-symbols2") {
+            list.insert(0, sys[p].clone());
+        }
+        list.insert(0, "jbm".to_owned());
+    }
+
+    // Named family "chakra" for the HUD display text (logo, headings, status).
+    let mut chakra = vec!["chakra-sb".to_owned(), "chakra".to_owned()];
+    chakra.extend(sys.iter().cloned());
+    fonts
         .families
-        .entry(egui::FontFamily::Proportional)
-        .or_default();
-    // Prepend Noto Sans (legible body face) ahead of the built-in primary.
-    if loaded.iter().any(|n| n == "sys-noto") {
-        list.insert(0, "sys-noto".to_string());
-    }
-    for name in &loaded {
-        if !list.contains(name) {
-            list.push(name.clone());
-        }
-    }
+        .insert(egui::FontFamily::Name("chakra".into()), chakra);
+
     ctx.set_fonts(fonts);
 }
 
@@ -781,6 +821,50 @@ impl AtermApp {
         }
     }
 
+    /// The tab whose grid the HUD banner describes: the focused one if it's on
+    /// the grid, else the first non-detached tab.
+    fn focused_grid_tab(&self) -> Option<&Tab> {
+        self.tabs
+            .iter()
+            .find(|t| t.id == self.focused && !t.detached)
+            .or_else(|| self.tabs.iter().find(|t| !t.detached))
+    }
+
+    /// Build the session-banner summary from the focused grid tab.
+    fn banner_info(&self) -> Option<crate::hud::SessionInfo> {
+        let t = self.focused_grid_tab()?;
+        let p = crate::theme::pal();
+        let (provider, accent) = crate::hud::provider_of(t.key.as_deref(), &t.argv);
+        let title = truncate(t.name.as_deref().unwrap_or(&t.term.title()), 48);
+        let cwd = t
+            .term
+            .cwd()
+            .or_else(|| t.cwd.clone())
+            .map(|path| {
+                let s = path.to_string_lossy().to_string();
+                match std::env::var_os("HOME").map(|h| h.to_string_lossy().to_string()) {
+                    Some(home) if s.starts_with(&home) => format!("~{}", &s[home.len()..]),
+                    _ => s,
+                }
+            })
+            .unwrap_or_default();
+        let (status, status_col) = if let Some(code) = t.term.exit_code() {
+            (format!("SALIÓ {code}"), p.red)
+        } else if t.term.has_foreground_process() {
+            ("EJECUTANDO".to_string(), p.green)
+        } else {
+            ("INACTIVO".to_string(), p.overlay)
+        };
+        Some(crate::hud::SessionInfo {
+            accent,
+            provider: provider.to_string(),
+            title,
+            cwd,
+            status,
+            status_col,
+        })
+    }
+
     /// Move tab `src` to sit before tab `before` (or to the end when `None`).
     fn move_tab(&mut self, src: u64, before: Option<u64>) {
         if before == Some(src) {
@@ -1209,8 +1293,58 @@ impl eframe::App for AtermApp {
                         {
                             pro_action = Some(ProAction::License);
                         }
+                        // HUD read-outs: live clock + active-session count.
+                        ui.separator();
+                        ui.label(crate::theme::hud(&crate::hud::clock(), 11.0).color(pal.blue));
+                        ui.separator();
+                        let running = self
+                            .tabs
+                            .iter()
+                            .filter(|t| t.term.has_foreground_process())
+                            .count();
+                        ui.label(
+                            egui::RichText::new(format!("{running} activas"))
+                                .size(11.0)
+                                .color(pal.overlay),
+                        );
+                        let (dr, _) =
+                            ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                        crate::hud::orb(
+                            ui.painter(),
+                            dr.center(),
+                            9.0,
+                            if running > 0 { pal.green } else { pal.overlay },
+                        );
                     });
                 });
+            });
+
+        // HUD session banner (below the header) + bottom status bar. Both read
+        // from precomputed summaries so their closures don't reborrow `self`.
+        let banner = self.banner_info();
+        let tab_count = self.tabs.iter().filter(|t| !t.detached).count();
+        let running_count = self
+            .tabs
+            .iter()
+            .filter(|t| t.term.has_foreground_process())
+            .count();
+        if let Some(info) = &banner {
+            egui::TopBottomPanel::top("banner")
+                .frame(
+                    egui::Frame::none()
+                        .fill(hpal.base)
+                        .inner_margin(egui::Margin::symmetric(0.0, 9.0)),
+                )
+                .show(ctx, |ui| crate::hud::banner(ui, info));
+        }
+        egui::TopBottomPanel::bottom("status")
+            .frame(
+                egui::Frame::none()
+                    .fill(hpal.mantle)
+                    .inner_margin(egui::Margin::symmetric(0.0, 5.0)),
+            )
+            .show(ctx, |ui| {
+                crate::hud::status_bar(ui, tab_count, running_count)
             });
 
         egui::SidePanel::left("sessions")
@@ -1263,10 +1397,17 @@ impl eframe::App for AtermApp {
             }
             if self.visible.is_empty() {
                 let pal = crate::theme::pal();
+                // Even with no terminal, keep the HUD backdrop + brackets so the
+                // empty state reads as part of the same interface.
+                let area = ui.max_rect();
+                if crate::settings::get().hud_grid {
+                    crate::hud::grid(ui.painter(), area);
+                }
+                crate::hud::corner_brackets(ui.painter(), area);
                 ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.32);
-                    ui.label(egui::RichText::new("aterm").size(34.0).color(pal.overlay));
-                    ui.add_space(4.0);
+                    ui.add_space(ui.available_height() * 0.30);
+                    ui.label(crate::theme::hud("NINGUNA TERMINAL ABIERTA", 15.0).color(pal.overlay));
+                    ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(
                             "Pulsa «>_» para abrir una shell, o «▶» en una sesión \
@@ -1299,7 +1440,28 @@ impl eframe::App for AtermApp {
                 self.search_bar(ui);
             }
             self.render_panes(ui);
+
+            // HUD overlay, painted on top of the grid so it reads as a heads-up
+            // layer: faint lattice, optional scanline sweep, accent brackets.
+            let s = crate::settings::get();
+            let area = ui.max_rect();
+            let painter = ui.painter();
+            if s.hud_grid {
+                crate::hud::grid(painter, area);
+            }
+            if s.scanlines {
+                let t = ui.input(|i| i.time) as f32;
+                crate::hud::scanline(painter, area, t / 7.0);
+            }
+            crate::hud::corner_brackets(painter, area);
         });
+
+        // Keep the clock ticking (~1s); drive the scanline faster when enabled.
+        if crate::settings::get().scanlines {
+            ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
 
         self.tab_edit_window(ctx);
         self.settings_window(ctx);
@@ -1548,6 +1710,21 @@ impl AtermApp {
                                 ui.label(
                                     egui::RichText::new(
                                         "La fuente del terminal aplica a pestañas nuevas.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.separator();
+                                crate::theme::heading(ui, "EFECTOS HUD");
+                                ui.add_space(4.0);
+                                ui.checkbox(&mut s.hud_grid, "Rejilla de fondo");
+                                ui.checkbox(
+                                    &mut s.scanlines,
+                                    "Línea de barrido (scanline) animada",
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "El barrido anima cada frame (consume algo de CPU).",
                                     )
                                     .small()
                                     .weak(),

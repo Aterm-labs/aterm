@@ -12,6 +12,7 @@ mod app;
 mod backup;
 mod commands;
 mod groups;
+mod hud;
 mod icons;
 mod license;
 mod persist;

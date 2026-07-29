@@ -9,6 +9,7 @@ resolver = "2"
 members = [
     "crates/agent-sessions",
     "crates/agent-sessions-cli",
+    "crates/agent-sessions-remote",
     "crates/aterm",
     "crates/aterm-pro-api",
 ]

@@ -30,6 +30,21 @@
 //!   service-status                     [{provider, indicator, description}] (statuspage v2)
 //!   live                               [{provider, sessionId, pid, status}] (cheap poll)
 //!   search-content <query>             [{provider, id, title, snippet, lastActivity}]
+//!
+//! Shared sessions (see `remote.rs`; engine in the `agent-sessions-remote` crate):
+//!   remote-config                                     → { servers, global, dirOverride }
+//!   remote-server-set                                 ← JSON {name,kind,host,auth,sshPort,token?}
+//!   remote-server-delete <name>                       → { ok }
+//!   remote-links <cwd>                                → { key, links, source }
+//!   remote-links-set <cwd>                            ← JSON [links]
+//!   remote-global-set                                 ← JSON [links]
+//!   remote-probe <server> [repo]                      → { ok, message }
+//!   remote-list <cwd> <repo>                          → [ manifest + localState ]
+//!   remote-plan <provider> <id>                       → { files, totalBytes, resumable }
+//!   remote-publish <cwd> <repo> <provider> <id>       → the published manifest
+//!   remote-fetch <cwd> <repo> <id>                    → { path, resumeArgv, divergence }
+//!   remote-unpublish <cwd> <repo> <id>                → { ok }
+//!   remote-shared <cwd>                               → { shared, failures }
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -45,6 +60,8 @@ use agent_sessions::types::{
 };
 use agent_sessions::{all_providers, encode_cwd};
 use serde::{Deserialize, Serialize};
+
+mod remote;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -79,13 +96,29 @@ fn main() {
         "templates-get" => templates_get(),
         "templates-set" => templates_set(args.get(1)),
         "templates-delete" => templates_delete(args.get(1)),
+        "remote-config" => remote::config_cmd(),
+        "remote-server-set" => remote::server_set_cmd(),
+        "remote-server-delete" => remote::server_delete_cmd(args.get(1)),
+        "remote-links" => remote::links_cmd(args.get(1)),
+        "remote-links-set" => remote::links_set_cmd(args.get(1)),
+        "remote-global-set" => remote::global_set_cmd(),
+        "remote-probe" => remote::probe_cmd(args.get(1), args.get(2)),
+        "remote-list" => remote::list_cmd(args.get(1), args.get(2)),
+        "remote-plan" => remote::plan_cmd(args.get(1), args.get(2)),
+        "remote-publish" => remote::publish_cmd(args.get(1), args.get(2), args.get(3), args.get(4)),
+        "remote-fetch" => remote::fetch_cmd(args.get(1), args.get(2), args.get(3)),
+        "remote-unpublish" => remote::unpublish_cmd(args.get(1), args.get(2), args.get(3)),
+        "remote-shared" => remote::shared_cmd(args.get(1)),
         other => fail(&format!(
             "comando desconocido: {other:?}\nuso: agent-sessions-cli \
              <scan|providers|preview|transcript|resume-argv|new-argv|compact-argv|metadata-get|\
              metadata-set|metadata-clear|projects-get|projects-set|projects-clear|\
              export|import|archive|unarchive|archive-restore|delete|move|serve|\
              backup|restore|service-status|live|search-content|templates-get|\
-             templates-set|templates-delete> [args]"
+             templates-set|templates-delete|remote-config|remote-server-set|\
+             remote-server-delete|remote-links|remote-links-set|remote-global-set|\
+             remote-probe|remote-list|remote-plan|remote-publish|remote-fetch|\
+             remote-unpublish|remote-shared> [args]"
         )),
     }
 }

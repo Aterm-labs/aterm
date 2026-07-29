@@ -37,6 +37,32 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// "Nexus" — cyberpunk/HUD skin. Near-black blue-tinted backgrounds, hair-line
+/// borders and neon accents (green/cyan/purple). This is aterm's default look.
+pub const NEXUS: Palette = Palette {
+    base: rgb(0x06, 0x09, 0x0e),    // bg0
+    mantle: rgb(0x0a, 0x0e, 0x15),  // bg1 (header/panel/status)
+    crust: rgb(0x04, 0x06, 0x0a),   // darker than bg0
+    surface0: rgb(0x0f, 0x16, 0x20), // bg2 (hover / faint)
+    surface1: rgb(0x14, 0x1d, 0x29), // bg3 (keycaps / hovered)
+    surface2: rgb(0x1e, 0x2a, 0x39), // active
+    overlay: rgb(0x72, 0x84, 0x99),  // dim
+    text: rgb(0xc4, 0xd2, 0xe0),
+    blue: rgb(0x00, 0xe5, 0xff),      // cyan (links/secondary accent)
+    lavender: rgb(0xb1, 0x4c, 0xff),  // purple
+    green: rgb(0x00, 0xff, 0x9d),     // primary accent
+    yellow: rgb(0xff, 0xb3, 0x40),    // warn
+    peach: rgb(0xff, 0x8c, 0x42),
+    red: rgb(0xff, 0x5c, 0x5c),       // danger
+    teal: rgb(0x00, 0xe5, 0xff),
+    mauve: rgb(0xb1, 0x4c, 0xff),
+    sapphire: rgb(0x38, 0xbd, 0xf8),
+    card: rgb(0x0c, 0x12, 0x1b),
+    term_bg: rgb(0x06, 0x09, 0x0e),
+    term_fg: rgb(0xc4, 0xd2, 0xe0),
+    selection: rgb(0x15, 0x3a, 0x4a),
+};
+
 pub const MOCHA: Palette = Palette {
     base: rgb(0x1e, 0x1e, 0x2e),
     mantle: rgb(0x18, 0x18, 0x25),
@@ -277,8 +303,9 @@ pub const LATTE: Palette = Palette {
     selection: rgb(0xbc, 0xc0, 0xcc),
 };
 
-/// Selectable themes, by display name.
-pub const THEMES: [(&str, Palette); 10] = [
+/// Selectable themes, by display name. Nexus is first → the default look.
+pub const THEMES: [(&str, Palette); 11] = [
+    ("Nexus", NEXUS),
     ("Catppuccin Mocha", MOCHA),
     ("Tokyo Night", TOKYO_NIGHT),
     ("Dracula", DRACULA),
@@ -291,7 +318,7 @@ pub const THEMES: [(&str, Palette); 10] = [
     ("Catppuccin Latte (claro)", LATTE),
 ];
 
-static CURRENT: RwLock<Palette> = RwLock::new(MOCHA);
+static CURRENT: RwLock<Palette> = RwLock::new(NEXUS);
 static CURRENT_NAME: RwLock<String> = RwLock::new(String::new());
 
 /// The active palette (cheap `Copy`).
@@ -349,13 +376,38 @@ fn theme_path() -> std::path::PathBuf {
 pub const RADIUS: f32 = 8.0;
 pub const GAP: f32 = 8.0;
 
-/// An accent-coloured section heading for dialogs/panels.
+/// The HUD display family (Chakra Petch), registered in `install_fonts`. Used
+/// for the logo, section headings, tab-strip labels and the status bar.
+pub fn chakra() -> egui::FontFamily {
+    egui::FontFamily::Name("chakra".into())
+}
+
+/// Insert hair-spaces between characters to emulate CSS `letter-spacing` (egui
+/// has no native tracking). Use for short uppercase HUD labels.
+pub fn track(text: &str) -> String {
+    let mut s = String::with_capacity(text.len() * 2);
+    for (i, c) in text.chars().enumerate() {
+        if i > 0 {
+            s.push('\u{2009}');
+        }
+        s.push(c);
+    }
+    s
+}
+
+/// A Chakra-Petch display label at `size`, letter-spaced for the HUD look.
+pub fn hud(text: &str, size: f32) -> egui::RichText {
+    egui::RichText::new(track(text))
+        .family(chakra())
+        .size(size)
+}
+
+/// An accent-coloured section heading for dialogs/panels (HUD display face).
 pub fn heading(ui: &mut egui::Ui, text: &str) {
     ui.label(
-        egui::RichText::new(text)
-            .color(pal().lavender)
-            .strong()
-            .size(13.0),
+        hud(&text.to_uppercase(), 12.0)
+            .color(pal().overlay)
+            .strong(),
     );
     ui.add_space(2.0);
 }
@@ -387,16 +439,21 @@ pub fn pill(ui: &mut egui::Ui, text: &str, fill: Color32, fg: Color32) -> egui::
         .response
 }
 
-/// The brand mark for the chrome ("◆ aterm").
+/// The brand mark for the chrome: a glowing accent dot + "ATERM · TERMINAL" in
+/// the HUD display face.
 pub fn brand(ui: &mut egui::Ui) {
     let p = pal();
-    ui.label(egui::RichText::new("◆").color(p.blue).size(15.0));
-    ui.label(
-        egui::RichText::new("aterm")
-            .color(p.text)
-            .strong()
-            .size(15.0),
-    );
+    // Glowing accent orb, drawn as concentric circles (faint halo → core).
+    let d = 14.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+    let c = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(c, d * 0.48, p.green.gamma_multiply(0.16));
+    painter.circle_filled(c, d * 0.34, p.green.gamma_multiply(0.35));
+    painter.circle_filled(c, d * 0.24, p.green);
+    ui.add_space(3.0);
+    ui.label(hud("ATERM", 15.0).color(p.text).strong());
+    ui.label(hud("TERMINAL", 10.0).color(p.overlay.gamma_multiply(0.85)));
 }
 
 /// Build egui's `Style`/`Visuals` from the active palette.

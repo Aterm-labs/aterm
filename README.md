@@ -16,6 +16,11 @@ y sin depender de un editor.
 [Extensión de VS Code](https://github.com/Aterm-labs/agent-sessions) ·
 [English](./README.en.md)
 
+<!-- CAPTURA PENDIENTE — ver CAPTURAS.md del meta-repo. Al añadir el fichero,
+     borra estas dos líneas de comentario y deja la imagen:
+<img src="media/panel-nativo.png" alt="El panel de sesiones y un terminal en la misma ventana" width="900" />
+-->
+
 </div>
 
 ---
@@ -145,7 +150,28 @@ Comandos: `scan`, `providers`, `preview`, `transcript`, `resume-argv`,
 `new-argv`, `compact-argv`, `metadata-{get,set,clear}`,
 `projects-{get,set,clear}`, `export`, `import`, `archive`, `unarchive`,
 `archive-restore`, `delete`, `move`, `backup`, `restore`, `service-status`,
-`live`, `search-content`, `templates-{get,set,delete}`, `serve`.
+`live`, `search-content`, `templates-{get,set,delete}`, `serve`, y los
+`remote-*` de sesiones compartidas (`remote-config`, `remote-server-set`,
+`remote-server-delete`, `remote-links`, `remote-links-set`, `remote-global-set`,
+`remote-probe`, `remote-list`, `remote-plan`, `remote-publish`, `remote-fetch`,
+`remote-unpublish`, `remote-shared`).
+
+### Sesiones compartidas
+
+Publicar una sesión en un repositorio que lee el equipo y traerse la de otro,
+conservando el id. Local-first: el repositorio (una carpeta, git por SSH, o la
+API de GitLab/GitHub) es un almacén, y la sesión se escribe de vuelta en el
+layout que su proveedor espera. El motor está en el crate
+`agent-sessions-remote` y lo consumen las dos interfaces; el diseño, los límites
+conocidos y cómo probarlo sin configurar nada están en
+[`docs/REMOTE-SESSIONS.md`](docs/REMOTE-SESSIONS.md).
+
+```bash
+export ATERM_REMOTE_DIR=/tmp/repo-sesiones      # probar sin configurar nada
+agent-sessions-cli remote-plan claude <id>      # qué ficheros subirían
+agent-sessions-cli remote-publish "$PWD" equipo claude <id>
+agent-sessions-cli remote-list "$PWD" equipo
+```
 
 ### Servidor MCP
 
